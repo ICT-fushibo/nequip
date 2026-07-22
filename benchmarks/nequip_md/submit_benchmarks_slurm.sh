@@ -30,7 +30,7 @@ artifact_hash() {
     fi
 }
 
-MAX_CONCURRENT="${MAX_CONCURRENT:-6}"
+MAX_CONCURRENT="${MAX_CONCURRENT:-8}"
 
 for required_path in "${SYSTEMS_FILE}" "${MODEL_PACKAGE}" "${COMPILED_MODEL}"; do
     if [[ ! -e "${required_path}" ]]; then

@@ -1,0 +1,14 @@
+# All CIF systems except demo.cif: label<TAB>absolute CIF path
+Cu16	/share/home/fushibo/MD_opt/cif_file/Cu16.cif
+Cu32	/share/home/fushibo/MD_opt/cif_file/Cu32.cif
+Cu64	/share/home/fushibo/MD_opt/cif_file/Cu64.cif
+Cu192	/share/home/fushibo/MD_opt/cif_file/Cu192.cif
+Cu512	/share/home/fushibo/MD_opt/cif_file/Cu512.cif
+Cu1024	/share/home/fushibo/MD_opt/cif_file/Cu1024.cif
+H2O16	/share/home/fushibo/MD_opt/cif_file/H2O16.cif
+H2O32	/share/home/fushibo/MD_opt/cif_file/H2O32.cif
+H2O60	/share/home/fushibo/MD_opt/cif_file/H2O60.cif
+H2O64	/share/home/fushibo/MD_opt/cif_file/H2O64.cif
+H2O192	/share/home/fushibo/MD_opt/cif_file/H2O192.cif
+H2O512	/share/home/fushibo/MD_opt/cif_file/H2O512.cif
+H2O1024	/share/home/fushibo/MD_opt/cif_file/H2O1024.cif

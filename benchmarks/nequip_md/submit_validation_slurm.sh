@@ -15,14 +15,19 @@ export VELOCITY_MODE="${VELOCITY_MODE:-maxwell}"
 export SEED="${SEED:-20260722}"
 export BENCH_SCRIPT_DIR="${SCRIPT_DIR}"
 
-MAX_CONCURRENT="${MAX_VALIDATION_CONCURRENT:-6}"
+MAX_CONCURRENT="${MAX_VALIDATION_CONCURRENT:-8}"
 
-for required_path in "${SYSTEMS_FILE}" "${MODEL_PACKAGE}" "${COMPILED_MODEL}"; do
+for required_path in "${SYSTEMS_FILE}" "${MODEL_PACKAGE}"; do
     if [[ ! -e "${required_path}" ]]; then
         echo "Required path not found: ${required_path}" >&2
         exit 2
     fi
 done
+if [[ -z "${COMPILE_JOB_ID:-}" && ! -e "${COMPILED_MODEL}" ]]; then
+    echo "Compiled model not found: ${COMPILED_MODEL}" >&2
+    echo "Compile it first, or provide COMPILE_JOB_ID for an afterok dependency." >&2
+    exit 2
+fi
 
 system_count="$(awk -F '\t' 'NF >= 2 && $1 !~ /^[[:space:]]*#/ && $1 !~ /^[[:space:]]*$/ {count++} END {print count+0}' "${SYSTEMS_FILE}")"
 if (( system_count == 0 )); then
@@ -39,6 +44,9 @@ sbatch_args=(
 )
 if [[ -n "${SLURM_ACCOUNT:-}" ]]; then
     sbatch_args+=(--account="${SLURM_ACCOUNT}")
+fi
+if [[ -n "${COMPILE_JOB_ID:-}" ]]; then
+    sbatch_args+=(--dependency="afterok:${COMPILE_JOB_ID}")
 fi
 
 echo "Submitting ${system_count} trajectory-validation jobs" >&2

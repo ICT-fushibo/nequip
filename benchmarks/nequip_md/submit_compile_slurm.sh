@@ -14,10 +14,12 @@ export BENCH_SCRIPT_DIR="${SCRIPT_DIR}"
 mkdir -p "${SLURM_LOG_DIR}"
 
 sbatch_args=(
+    --parsable
     --export=ALL
 )
 if [[ -n "${SLURM_ACCOUNT:-}" ]]; then
     sbatch_args+=(--account="${SLURM_ACCOUNT}")
 fi
 
+echo "Submitting AOTI+OpenEquivariance compilation" >&2
 sbatch "${sbatch_args[@]}" "${SCRIPT_DIR}/slurm_compile.sbatch"
