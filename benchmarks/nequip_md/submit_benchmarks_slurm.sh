@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+
+export SYSTEMS_FILE="${SYSTEMS_FILE:-${SCRIPT_DIR}/systems.tsv}"
+export MODEL_PACKAGE="${MODEL_PACKAGE:-/share/home/fushibo/NequIP-OAM-L-0.1.nequip.zip}"
+export COMPILED_MODEL="${COMPILED_MODEL:-${REPO_ROOT}/benchmark_artifacts/NequIP-OAM-L-0.1-ase-oeq-no-cg.nequip.pt2}"
+export OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/benchmark_results/nequip_e0_e1_b0_b1}"
+export VALIDATION_DIR="${VALIDATION_DIR:-${OUTPUT_DIR}/validation}"
+export REQUIRE_VALIDATION="${REQUIRE_VALIDATION:-1}"
+export REPEATS="${REPEATS:-5}"
+export STEPS="${STEPS:-1000}"
+export WARMUP_STEPS="${WARMUP_STEPS:-3}"
+export TIMESTEP_FS="${TIMESTEP_FS:-1.0}"
+export TEMPERATURE_K="${TEMPERATURE_K:-300.0}"
+export VELOCITY_MODE="${VELOCITY_MODE:-maxwell}"
+export SEED="${SEED:-20260722}"
+export CONDA_ENV="${CONDA_ENV:-nequip_opt}"
+export ENV_SETUP="${ENV_SETUP:-}"
+export BENCH_SCRIPT_DIR="${SCRIPT_DIR}"
+
+artifact_hash() {
+    local artifact="$1"
+    if [[ -f "${artifact}.sha256" ]]; then
+        awk 'NR == 1 {print $1}' "${artifact}.sha256"
+    elif command -v sha256sum >/dev/null 2>&1 && [[ -f "${artifact}" ]]; then
+        sha256sum "${artifact}" | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
+PARTITION="${PARTITION:-H100}"
+GRES="${GRES:-gpu:h100:1}"
+CPUS_PER_TASK="${CPUS_PER_TASK:-16}"
+MEMORY="${MEMORY:-64G}"
+TIME_LIMIT="${TIME_LIMIT:-04:00:00}"
+MAX_CONCURRENT="${MAX_CONCURRENT:-8}"
+
+for required_path in "${SYSTEMS_FILE}" "${MODEL_PACKAGE}" "${COMPILED_MODEL}"; do
+    if [[ ! -e "${required_path}" ]]; then
+        echo "Required path not found: ${required_path}" >&2
+        exit 2
+    fi
+done
+
+if [[ "${REQUIRE_VALIDATION}" == "1" && -z "${VALIDATION_JOB_ID:-}" ]]; then
+    while IFS=$'\t' read -r label structure _; do
+        [[ -z "${label}" || "${label}" =~ ^[[:space:]]*# ]] && continue
+        if [[ ! -f "${VALIDATION_DIR}/${label}.json" ]]; then
+            echo "Validation result missing: ${VALIDATION_DIR}/${label}.json" >&2
+            echo "Run/submit numerical validation first, or provide VALIDATION_JOB_ID." >&2
+            exit 2
+        fi
+    done < "${SYSTEMS_FILE}"
+fi
+
+# Compute on the submit host once instead of hashing large artifacts inside
+# every array task while neighboring jobs are being timed.
+export MODEL_PACKAGE_SHA256="${MODEL_PACKAGE_SHA256:-$(artifact_hash "${MODEL_PACKAGE}")}"
+export COMPILED_MODEL_SHA256="${COMPILED_MODEL_SHA256:-$(artifact_hash "${COMPILED_MODEL}")}"
+
+system_count="$(awk -F '\t' 'NF >= 2 && $1 !~ /^[[:space:]]*#/ && $1 !~ /^[[:space:]]*$/ {count++} END {print count+0}' "${SYSTEMS_FILE}")"
+if (( system_count == 0 )); then
+    echo "No systems found in ${SYSTEMS_FILE}" >&2
+    exit 2
+fi
+task_count="$((system_count * REPEATS))"
+array_end="$((task_count - 1))"
+
+mkdir -p "${OUTPUT_DIR}/slurm" "${OUTPUT_DIR}/json" "${OUTPUT_DIR}/logs"
+
+sbatch_args=(
+    --partition="${PARTITION}"
+    --gres="${GRES}"
+    --cpus-per-task="${CPUS_PER_TASK}"
+    --mem="${MEMORY}"
+    --time="${TIME_LIMIT}"
+    --array="0-${array_end}%${MAX_CONCURRENT}"
+    --output="${OUTPUT_DIR}/slurm/slurm-%A_%a.out"
+    --error="${OUTPUT_DIR}/slurm/slurm-%A_%a.err"
+    --export=ALL
+)
+if [[ -n "${SLURM_ACCOUNT:-}" ]]; then
+    sbatch_args+=(--account="${SLURM_ACCOUNT}")
+fi
+if [[ -n "${VALIDATION_JOB_ID:-}" ]]; then
+    sbatch_args+=(--dependency="afterok:${VALIDATION_JOB_ID}")
+fi
+
+echo "Submitting ${task_count} array tasks (${system_count} systems x ${REPEATS} repeats)"
+echo "At most ${MAX_CONCURRENT} H100 jobs will run concurrently"
+sbatch "${sbatch_args[@]}" "${SCRIPT_DIR}/slurm_benchmark.sbatch"

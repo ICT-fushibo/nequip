@@ -158,3 +158,8 @@ cython_debug/
 
 **/.claude/settings.local.json
 **/CLAUDE.local.md
+
+# Local NequIP MD benchmark inputs and outputs
+benchmarks/nequip_md/systems.tsv
+benchmark_artifacts/
+benchmark_results/
