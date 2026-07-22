@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=nequip-validate
+#SBATCH --partition=h100
+#SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
+#SBATCH --cpus-per-task=32
+#SBATCH --output=/share/home/fushibo/MD_opt/nequip/log/validation-%A_%a.log
+
+# Fixed cluster environment.
+source /etc/profile.d/modules.sh
+module load cuda/12.8
+source /share/home/fushibo/software/miniconda3/bin/activate nequip_opt
 
 set -euo pipefail
 
@@ -19,16 +28,6 @@ TIMESTEP_FS="${TIMESTEP_FS:-1.0}"
 TEMPERATURE_K="${TEMPERATURE_K:-300.0}"
 VELOCITY_MODE="${VELOCITY_MODE:-maxwell}"
 SEED="${SEED:-20260722}"
-
-if [[ -n "${ENV_SETUP:-}" ]]; then
-    # shellcheck disable=SC1090
-    source "${ENV_SETUP}"
-elif [[ -n "${CONDA_ENV:-}" ]]; then
-    CONDA_BASE="$(conda info --base)"
-    # shellcheck disable=SC1091
-    source "${CONDA_BASE}/etc/profile.d/conda.sh"
-    conda activate "${CONDA_ENV}"
-fi
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-${SLURM_CPUS_PER_TASK:-1}}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-${SLURM_CPUS_PER_TASK:-1}}"

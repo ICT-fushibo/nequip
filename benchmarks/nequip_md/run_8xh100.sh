@@ -84,14 +84,12 @@ cd "${REPO_ROOT}"
 MODEL_PACKAGE_SHA256="${MODEL_PACKAGE_SHA256:-$(artifact_hash "${MODEL_PACKAGE}")}"
 COMPILED_MODEL_SHA256="${COMPILED_MODEL_SHA256:-$(artifact_hash "${COMPILED_MODEL}")}"
 
-# A group is one (system, repeat) pair.  All four modes in a group run
-# sequentially on the same physical GPU.  Different groups use different GPUs.
+# A group is one system. All repeats and modes for that system run sequentially
+# on the same physical GPU. Different systems use different GPUs.
 TASK_GROUPS=()
-for ((repeat = 0; repeat < REPEATS; repeat++)); do
-    for system_index in "${!SYSTEMS[@]}"; do
-        IFS=$'\t' read -r label structure <<< "${SYSTEMS[system_index]}"
-        TASK_GROUPS+=("${system_index}"$'\t'"${repeat}"$'\t'"${label}"$'\t'"${structure}")
-    done
+for system_index in "${!SYSTEMS[@]}"; do
+    IFS=$'\t' read -r label structure <<< "${SYSTEMS[system_index]}"
+    TASK_GROUPS+=("${system_index}"$'\t'"${label}"$'\t'"${structure}")
 done
 
 mode_order() {
@@ -117,47 +115,49 @@ run_worker() {
     fi
 
     for ((group_index = gpu; group_index < ${#TASK_GROUPS[@]}; group_index += NGPUS)); do
-        IFS=$'\t' read -r system_index repeat label structure <<< "${TASK_GROUPS[group_index]}"
-        order="$(mode_order "$((repeat + system_index))")"
-        for mode in ${order}; do
-            output_path="${OUTPUT_DIR}/json/${label}.${mode}.repeat${repeat}.json"
-            log_path="${OUTPUT_DIR}/logs/${label}.${mode}.repeat${repeat}.gpu${gpu}.log"
-            validation_path="${VALIDATION_DIR}/${label}.json"
-            if [[ "${mode}" == "E0" || "${mode}" == "E1" ]]; then
-                selected_hash="${MODEL_PACKAGE_SHA256}"
-            else
-                selected_hash="${COMPILED_MODEL_SHA256}"
-            fi
-            bench_command=(
-                "${PYTHON_BIN}" "${SCRIPT_DIR}/benchmark_md.py"
-                --mode "${mode}"
-                --structure "${structure}"
-                --system-label "${label}"
-                --model-package "${MODEL_PACKAGE}"
-                --compiled-model "${COMPILED_MODEL}"
-                --steps "${STEPS}"
-                --warmup-steps "${WARMUP_STEPS}"
-                --timestep-fs "${TIMESTEP_FS}"
-                --temperature-k "${TEMPERATURE_K}"
-                --velocity-mode "${VELOCITY_MODE}"
-                --seed "${SEED}"
-                --repeat "${repeat}"
-                --output "${output_path}"
-            )
-            if [[ -f "${validation_path}" ]]; then
-                bench_command+=(--validation-result "${validation_path}")
-            fi
-            if [[ -n "${selected_hash}" ]]; then
-                bench_command+=(--model-sha256 "${selected_hash}")
-            else
-                bench_command+=(--skip-model-hash)
-            fi
-            echo "GPU ${gpu}: ${label} repeat=${repeat} mode=${mode}"
-            if [[ -n "${cpuset}" ]]; then
-                CUDA_VISIBLE_DEVICES="${gpu}" taskset -c "${cpuset}" "${bench_command[@]}" >"${log_path}" 2>&1
-            else
-                CUDA_VISIBLE_DEVICES="${gpu}" "${bench_command[@]}" >"${log_path}" 2>&1
-            fi
+        IFS=$'\t' read -r system_index label structure <<< "${TASK_GROUPS[group_index]}"
+        validation_path="${VALIDATION_DIR}/${label}.json"
+        for ((repeat = 0; repeat < REPEATS; repeat++)); do
+            order="$(mode_order "$((repeat + system_index))")"
+            for mode in ${order}; do
+                output_path="${OUTPUT_DIR}/json/${label}.${mode}.repeat${repeat}.json"
+                log_path="${OUTPUT_DIR}/logs/${label}.${mode}.repeat${repeat}.gpu${gpu}.log"
+                if [[ "${mode}" == "E0" || "${mode}" == "E1" ]]; then
+                    selected_hash="${MODEL_PACKAGE_SHA256}"
+                else
+                    selected_hash="${COMPILED_MODEL_SHA256}"
+                fi
+                bench_command=(
+                    "${PYTHON_BIN}" "${SCRIPT_DIR}/benchmark_md.py"
+                    --mode "${mode}"
+                    --structure "${structure}"
+                    --system-label "${label}"
+                    --model-package "${MODEL_PACKAGE}"
+                    --compiled-model "${COMPILED_MODEL}"
+                    --steps "${STEPS}"
+                    --warmup-steps "${WARMUP_STEPS}"
+                    --timestep-fs "${TIMESTEP_FS}"
+                    --temperature-k "${TEMPERATURE_K}"
+                    --velocity-mode "${VELOCITY_MODE}"
+                    --seed "${SEED}"
+                    --repeat "${repeat}"
+                    --output "${output_path}"
+                )
+                if [[ -f "${validation_path}" ]]; then
+                    bench_command+=(--validation-result "${validation_path}")
+                fi
+                if [[ -n "${selected_hash}" ]]; then
+                    bench_command+=(--model-sha256 "${selected_hash}")
+                else
+                    bench_command+=(--skip-model-hash)
+                fi
+                echo "GPU ${gpu}: ${label} repeat=${repeat} mode=${mode}"
+                if [[ -n "${cpuset}" ]]; then
+                    CUDA_VISIBLE_DEVICES="${gpu}" taskset -c "${cpuset}" "${bench_command[@]}" >"${log_path}" 2>&1
+                else
+                    CUDA_VISIBLE_DEVICES="${gpu}" "${bench_command[@]}" >"${log_path}" 2>&1
+                fi
+            done
         done
     done
 }

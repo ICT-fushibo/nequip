@@ -13,15 +13,8 @@ export TIMESTEP_FS="${TIMESTEP_FS:-1.0}"
 export TEMPERATURE_K="${TEMPERATURE_K:-300.0}"
 export VELOCITY_MODE="${VELOCITY_MODE:-maxwell}"
 export SEED="${SEED:-20260722}"
-export CONDA_ENV="${CONDA_ENV:-nequip_opt}"
-export ENV_SETUP="${ENV_SETUP:-}"
 export BENCH_SCRIPT_DIR="${SCRIPT_DIR}"
 
-PARTITION="${PARTITION:-H100}"
-GRES="${GRES:-gpu:h100:1}"
-CPUS_PER_TASK="${CPUS_PER_TASK:-16}"
-MEMORY="${MEMORY:-64G}"
-TIME_LIMIT="${VALIDATION_TIME_LIMIT:-08:00:00}"
 MAX_CONCURRENT="${MAX_VALIDATION_CONCURRENT:-6}"
 
 for required_path in "${SYSTEMS_FILE}" "${MODEL_PACKAGE}" "${COMPILED_MODEL}"; do
@@ -37,18 +30,11 @@ if (( system_count == 0 )); then
     exit 2
 fi
 array_end="$((system_count - 1))"
-mkdir -p "${VALIDATION_DIR}" "${OUTPUT_DIR}/slurm_validation"
+mkdir -p "${VALIDATION_DIR}" /share/home/fushibo/MD_opt/nequip/log
 
 sbatch_args=(
     --parsable
-    --partition="${PARTITION}"
-    --gres="${GRES}"
-    --cpus-per-task="${CPUS_PER_TASK}"
-    --mem="${MEMORY}"
-    --time="${TIME_LIMIT}"
     --array="0-${array_end}%${MAX_CONCURRENT}"
-    --output="${OUTPUT_DIR}/slurm_validation/slurm-%A_%a.out"
-    --error="${OUTPUT_DIR}/slurm_validation/slurm-%A_%a.err"
     --export=ALL
 )
 if [[ -n "${SLURM_ACCOUNT:-}" ]]; then

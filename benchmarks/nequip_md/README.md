@@ -73,16 +73,18 @@ E0/E1/B0/B1 comparison.
 On Slurm:
 
 ```bash
-PARTITION=H100 GRES=gpu:h100:1 CONDA_ENV=nequip_opt \
-  bash benchmarks/nequip_md/submit_compile_slurm.sh
+bash benchmarks/nequip_md/submit_compile_slurm.sh
 ```
 
-If the cluster uses modules or a custom environment setup, create a shell file
-that loads them and export its path instead:
+All Slurm jobs use the fixed cluster setup:
 
-```bash
-ENV_SETUP=/share/home/fushibo/env/nequip_setup.sh \
-  bash benchmarks/nequip_md/submit_compile_slurm.sh
+```text
+partition: h100
+GPU:       --gres=gpu:1
+CPU:       --cpus-per-task=32
+CUDA:      module load cuda/12.8
+Conda:     /share/home/fushibo/software/miniconda3, environment nequip_opt
+logs:      /share/home/fushibo/MD_opt/nequip/log/
 ```
 
 ## Validate 1000-step trajectories before timing
@@ -116,9 +118,10 @@ continues and records the failed status.
 
 ## Regular 8xH100 server
 
-The server script distributes `(system, repeat)` groups over the GPUs. Within a
-group, E0/E1/B0/B1 run sequentially as separate processes on the same physical
-GPU. Their order rotates between repeats.
+The server script distributes system groups over the GPUs. All repeats and
+E0/E1/B0/B1 modes for one system run sequentially as separate processes on the
+same physical GPU. Their order rotates between repeats. With six systems, at
+most six of the eight H100 GPUs are used concurrently.
 
 ```bash
 NGPUS=8 REPEATS=5 STEPS=1000 WARMUP_STEPS=3 \
@@ -144,44 +147,52 @@ topology first. If independent CPU core/NUMA allocation cannot be guaranteed,
 use `NGPUS=1` for the strict publication run; `NGPUS=8` is primarily the faster
 throughput mode.
 
-## Slurm H100 validation and performance arrays
+## Slurm H100 validation, performance, and summary pipeline
 
-The simplest submission runs validation first, then starts the performance
-array after all validation jobs finish:
+The pipeline submits all stages with `sbatch` and scheduler dependencies:
 
 ```bash
-PARTITION=H100 \
-GRES=gpu:h100:1 \
-CONDA_ENV=nequip_opt \
 REPEATS=5 \
 STEPS=1000 \
 bash benchmarks/nequip_md/submit_pipeline_slurm.sh
 ```
 
-Numerical threshold failures do not break the dependency because they are data,
-not runtime failures. Missing files, model crashes, or scheduler failures do
-break it.
+The dependency chain is:
 
-Each array task requests one H100 and runs all four modes sequentially for one
-`(system, repeat)` pair. With six systems and five repeats, 30 array tasks are
-submitted, with at most eight running concurrently by default. To submit only
-the performance stage after validation files already exist:
+```text
+validation array (one job per system)
+    --afterok-->
+performance array (one job per system, all repeats in that job)
+    --afterany-->
+summary job (writes summary.json and summary.csv)
+```
+
+For six structures, validation has six array tasks and performance has six
+array tasks. Each performance task owns one structure, one H100, and runs all
+repeats plus E0/E1/B0/B1 sequentially on that same GPU. Mode order rotates
+between repeats.
+
+Numerical threshold failures do not fail validation jobs because they are data,
+so performance still runs and records `failed`. Runtime failures stop the
+`afterok` validation-to-performance dependency. Summary uses `afterany`, so it
+can still collect partial output after all performance tasks terminate.
+
+To submit only the performance stage after validation files already exist:
 
 ```bash
-PARTITION=H100 \
-GRES=gpu:h100:1 \
-CPUS_PER_TASK=16 \
-MEMORY=64G \
-TIME_LIMIT=04:00:00 \
-MAX_CONCURRENT=8 \
-CONDA_ENV=nequip_opt \
 REPEATS=5 \
 STEPS=1000 \
 bash benchmarks/nequip_md/submit_benchmarks_slurm.sh
 ```
 
-Change `PARTITION` and `GRES` if the cluster uses different names. Set
-`SLURM_ACCOUNT` when the cluster requires an account.
+The complete pipeline submits the summary automatically. For a separately
+submitted performance array, submit summary using the returned job ID:
+
+```bash
+BENCHMARK_JOB_ID=<job-id> bash benchmarks/nequip_md/submit_summary_slurm.sh
+```
+
+Set `SLURM_ACCOUNT` only if the cluster requires an account.
 
 ## Timing semantics
 

@@ -17,8 +17,6 @@ export TIMESTEP_FS="${TIMESTEP_FS:-1.0}"
 export TEMPERATURE_K="${TEMPERATURE_K:-300.0}"
 export VELOCITY_MODE="${VELOCITY_MODE:-maxwell}"
 export SEED="${SEED:-20260722}"
-export CONDA_ENV="${CONDA_ENV:-nequip_opt}"
-export ENV_SETUP="${ENV_SETUP:-}"
 export BENCH_SCRIPT_DIR="${SCRIPT_DIR}"
 
 artifact_hash() {
@@ -32,12 +30,7 @@ artifact_hash() {
     fi
 }
 
-PARTITION="${PARTITION:-H100}"
-GRES="${GRES:-gpu:h100:1}"
-CPUS_PER_TASK="${CPUS_PER_TASK:-16}"
-MEMORY="${MEMORY:-64G}"
-TIME_LIMIT="${TIME_LIMIT:-04:00:00}"
-MAX_CONCURRENT="${MAX_CONCURRENT:-8}"
+MAX_CONCURRENT="${MAX_CONCURRENT:-6}"
 
 for required_path in "${SYSTEMS_FILE}" "${MODEL_PACKAGE}" "${COMPILED_MODEL}"; do
     if [[ ! -e "${required_path}" ]]; then
@@ -67,20 +60,14 @@ if (( system_count == 0 )); then
     echo "No systems found in ${SYSTEMS_FILE}" >&2
     exit 2
 fi
-task_count="$((system_count * REPEATS))"
+task_count="${system_count}"
 array_end="$((task_count - 1))"
 
-mkdir -p "${OUTPUT_DIR}/slurm" "${OUTPUT_DIR}/json" "${OUTPUT_DIR}/logs"
+mkdir -p "${OUTPUT_DIR}/json" "${OUTPUT_DIR}/logs" /share/home/fushibo/MD_opt/nequip/log
 
 sbatch_args=(
-    --partition="${PARTITION}"
-    --gres="${GRES}"
-    --cpus-per-task="${CPUS_PER_TASK}"
-    --mem="${MEMORY}"
-    --time="${TIME_LIMIT}"
+    --parsable
     --array="0-${array_end}%${MAX_CONCURRENT}"
-    --output="${OUTPUT_DIR}/slurm/slurm-%A_%a.out"
-    --error="${OUTPUT_DIR}/slurm/slurm-%A_%a.err"
     --export=ALL
 )
 if [[ -n "${SLURM_ACCOUNT:-}" ]]; then
@@ -90,6 +77,6 @@ if [[ -n "${VALIDATION_JOB_ID:-}" ]]; then
     sbatch_args+=(--dependency="afterok:${VALIDATION_JOB_ID}")
 fi
 
-echo "Submitting ${task_count} array tasks (${system_count} systems x ${REPEATS} repeats)"
-echo "At most ${MAX_CONCURRENT} H100 jobs will run concurrently"
+echo "Submitting ${task_count} system-grouped array tasks; each runs ${REPEATS} repeats" >&2
+echo "At most ${MAX_CONCURRENT} H100 jobs will run concurrently" >&2
 sbatch "${sbatch_args[@]}" "${SCRIPT_DIR}/slurm_benchmark.sbatch"
