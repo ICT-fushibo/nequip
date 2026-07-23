@@ -10,6 +10,7 @@ export ARTIFACT_DIR="${ARTIFACT_DIR:-${REPO_ROOT}/benchmark_artifacts}"
 export MODEL_SOURCE="${MODEL_SOURCE:-nequip.net:mir-group/NequIP-OAM-L:0.1}"
 export MODEL_PACKAGE="${MODEL_PACKAGE:-${ARTIFACT_DIR}/models/NequIP-OAM-L-0.1.nequip.zip}"
 export WITH_CONSTANT_FOLD="${WITH_CONSTANT_FOLD:-0}"
+export NEQUIP_CONDA_ENV="${NEQUIP_CONDA_ENV:-nequip_opt}"
 export BENCH_SCRIPT_DIR="${SCRIPT_DIR}"
 
 python "${SCRIPT_DIR}/fetch_official_model.py" \

@@ -8,7 +8,9 @@ source /etc/profile.d/modules.sh || exit $?
 module purge || exit $?
 unset CUDA_HOME CUDA_PATH CUDACXX
 module load cuda/12.8 || exit $?
-source /share/home/fushibo/software/miniconda3/bin/activate nequip_opt || exit $?
+NEQUIP_CONDA_ENV="${NEQUIP_CONDA_ENV:-nequip_opt}"
+source /share/home/fushibo/software/miniconda3/bin/activate "${NEQUIP_CONDA_ENV}" || exit $?
+export NEQUIP_CONDA_ENV
 
 # Match the cluster template: enable strict mode only after modules and Conda
 # are initialized, because their activation scripts are not guaranteed to be
@@ -34,9 +36,24 @@ if [[ ! -f "${CUDA_HOME}/include/cuda_runtime_api.h" ]]; then
 fi
 
 # Compile OpenEquivariance once in the dependency job and reuse the resulting
-# extension in validation/benchmark jobs. The versioned directory also avoids
-# the stale failed build left under the default ~/.cache/torch_extensions.
-export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-/share/home/fushibo/.cache/torch_extensions/nequip_py310_torch29_cu126_cuda128}"
+# extension in validation/benchmark jobs. Include the active Python and Torch
+# versions in the directory because PyTorch extensions are interpreter- and
+# ABI-specific.
+EXTENSION_ABI_TAG="$(
+    python - <<'PY'
+import re
+import sys
+import torch
+
+raw = (
+    f"py{sys.version_info.major}{sys.version_info.minor}_"
+    f"torch{torch.__version__}_"
+    f"torchcuda{torch.version.cuda}"
+)
+print(re.sub(r"[^A-Za-z0-9_.-]", "_", raw))
+PY
+)"
+export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-/share/home/fushibo/.cache/torch_extensions/nequip_${EXTENSION_ABI_TAG}_cuda128}"
 export MAX_JOBS="${MAX_JOBS:-${SLURM_CPUS_PER_TASK:-32}}"
 mkdir -p "${TORCH_EXTENSIONS_DIR}"
 
@@ -55,6 +72,8 @@ mkdir -p \
     "${CUDA_CACHE_PATH}"
 
 echo "Slurm CUDA environment:"
+echo "  NEQUIP_CONDA_ENV=${NEQUIP_CONDA_ENV}"
+echo "  EXTENSION_ABI_TAG=${EXTENSION_ABI_TAG}"
 echo "  CUDA_HOME=${CUDA_HOME}"
 echo "  CUDACXX=${CUDACXX}"
 echo "  TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR}"
@@ -76,7 +95,14 @@ print(f"  python.executable={sys.executable}")
 print(f"  torch={torch.__version__}")
 print(f"  torch.version.git_version={torch.version.git_version}")
 print(f"  torch.version.cuda={torch.version.cuda}")
-for package in ("nequip", "e3nn", "openequivariance", "triton"):
+for package in (
+    "nequip",
+    "e3nn",
+    "openequivariance",
+    "nvalchemi-toolkit-ops",
+    "warp-lang",
+    "triton",
+):
     try:
         version = importlib.metadata.version(package)
     except importlib.metadata.PackageNotFoundError:

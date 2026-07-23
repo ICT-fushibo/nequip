@@ -21,6 +21,7 @@ export TIMESTEP_FS="${TIMESTEP_FS:-1.0}"
 export TEMPERATURE_K="${TEMPERATURE_K:-300.0}"
 export VELOCITY_MODE="${VELOCITY_MODE:-maxwell}"
 export SEED="${SEED:-20260722}"
+export NEQUIP_CONDA_ENV="${NEQUIP_CONDA_ENV:-nequip_opt}"
 
 for required_path in "${SYSTEMS_FILE}" "${MODEL_PACKAGE}" "${MODEL_PACKAGE}.sha256" "${MODEL_PACKAGE}.source"; do
     if [[ ! -e "${required_path}" ]]; then

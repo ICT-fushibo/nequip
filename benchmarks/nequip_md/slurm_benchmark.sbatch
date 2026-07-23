@@ -13,6 +13,8 @@ SCRIPT_DIR="${BENCH_SCRIPT_DIR}"
 source "${SCRIPT_DIR}/setup_slurm_env.sh"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 
+python "${SCRIPT_DIR}/check_b1_dependencies.py"
+
 : "${SYSTEMS_FILE:?SYSTEMS_FILE must be exported by submit_benchmarks_slurm.sh}"
 : "${MODEL_PACKAGE:?MODEL_PACKAGE must be set}"
 : "${COMPILED_MODEL:?COMPILED_MODEL must be set}"

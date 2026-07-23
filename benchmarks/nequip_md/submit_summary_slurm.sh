@@ -7,6 +7,7 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 : "${BENCHMARK_JOB_ID:?BENCHMARK_JOB_ID must identify the performance array}"
 
 export OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/benchmark_results/nequip_e0_e1_b0_b1}"
+export NEQUIP_CONDA_ENV="${NEQUIP_CONDA_ENV:-nequip_opt}"
 export BENCH_SCRIPT_DIR="${SCRIPT_DIR}"
 
 mkdir -p /share/home/fushibo/MD_opt/nequip/log

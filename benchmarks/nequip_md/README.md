@@ -35,6 +35,31 @@ Run every command from the repository checkout. The active environment must
 contain NequIP, ASE, matscipy, OpenEquivariance, and the alchemiops package used
 by NequIP's `alchemiops` neighbor-list backend.
 
+B1 specifically requires NVIDIA's `nvalchemi-toolkit-ops` distribution (import
+name `nvalchemiops`). Official releases require Python 3.11 or newer. Slurm
+defaults to the `nequip_opt` Conda environment; set
+`NEQUIP_CONDA_ENV=nequip_opt_py312` when using a separate Python 3.12 benchmark
+environment. Validation and performance jobs run `check_b1_dependencies.py`
+before loading structures so a missing GPU-neighbor-list dependency fails
+immediately rather than after E0/E1/B0 trajectories have completed.
+
+One compatible pinned environment can be created on the login node with:
+
+```bash
+conda create -n nequip_opt_py312 python=3.12 pip -y
+conda activate nequip_opt_py312
+python -m pip install torch==2.9.0 \
+  --index-url https://download.pytorch.org/whl/cu126
+python -m pip install -e /share/home/fushibo/MD_opt/nequip
+python -m pip install \
+  openequivariance==0.6.8 \
+  nvalchemi-toolkit-ops==0.3.1
+python benchmarks/nequip_md/check_b1_dependencies.py
+```
+
+Submit with `NEQUIP_CONDA_ENV=nequip_opt_py312`. Do not use pip's
+`--ignore-requires-python` to force nvalchemiops into Python 3.10.
+
 ## Structure manifest
 
 The one-command Slurm pipeline uses `systems.slurm.tsv`, which contains every
