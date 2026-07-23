@@ -122,7 +122,9 @@ from the submit shell, loads CUDA 12.8, derives `CUDA_HOME` from that module's
 `nvcc`, and rejects a missing CUDA header before launching Python. The compile
 dependency also builds the OpenEquivariance extension in a versioned shared
 `TORCH_EXTENSIONS_DIR`; validation and benchmark arrays reuse it instead of
-starting concurrent first-time JIT builds.
+starting concurrent first-time JIT builds. TorchInductor, Triton, and CUDA
+generated-code caches are job-local under `SLURM_TMPDIR` (or `/tmp`) so stale
+code from an earlier failed job cannot affect numerical validation.
 
 ## Validate 1000-step trajectories before timing
 
