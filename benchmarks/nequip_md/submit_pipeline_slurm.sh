@@ -6,8 +6,10 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 
 # Fixed production inputs for every CIF system except demo.cif.
 export SYSTEMS_FILE="${SYSTEMS_FILE:-${SCRIPT_DIR}/systems.slurm.tsv}"
-export MODEL_PACKAGE="${MODEL_PACKAGE:-/share/home/fushibo/NequIP-OAM-L-0.1.nequip.zip}"
-export COMPILED_MODEL="${COMPILED_MODEL:-${REPO_ROOT}/benchmark_artifacts/NequIP-OAM-L-0.1-ase-oeq-no-cg.nequip.pt2}"
+export ARTIFACT_DIR="${ARTIFACT_DIR:-${REPO_ROOT}/benchmark_artifacts}"
+export MODEL_SOURCE="${MODEL_SOURCE:-nequip.net:mir-group/NequIP-OAM-L:0.1}"
+export MODEL_PACKAGE="${MODEL_PACKAGE:-${ARTIFACT_DIR}/models/NequIP-OAM-L-0.1.nequip.zip}"
+export COMPILED_MODEL="${COMPILED_MODEL:-${ARTIFACT_DIR}/NequIP-OAM-L-0.1-ase-oeq-no-cg.nequip.pt2}"
 export OUTPUT_MODEL="${OUTPUT_MODEL:-${COMPILED_MODEL}}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 export OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/benchmark_results/nequip_e0_e1_b0_b1/${RUN_ID}}"
@@ -20,7 +22,7 @@ export TEMPERATURE_K="${TEMPERATURE_K:-300.0}"
 export VELOCITY_MODE="${VELOCITY_MODE:-maxwell}"
 export SEED="${SEED:-20260722}"
 
-for required_path in "${SYSTEMS_FILE}" "${MODEL_PACKAGE}"; do
+for required_path in "${SYSTEMS_FILE}"; do
     if [[ ! -e "${required_path}" ]]; then
         echo "Required path not found: ${required_path}" >&2
         exit 2

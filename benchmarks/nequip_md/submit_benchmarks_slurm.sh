@@ -5,8 +5,9 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 
 export SYSTEMS_FILE="${SYSTEMS_FILE:-${SCRIPT_DIR}/systems.tsv}"
-export MODEL_PACKAGE="${MODEL_PACKAGE:-/share/home/fushibo/NequIP-OAM-L-0.1.nequip.zip}"
-export COMPILED_MODEL="${COMPILED_MODEL:-${REPO_ROOT}/benchmark_artifacts/NequIP-OAM-L-0.1-ase-oeq-no-cg.nequip.pt2}"
+export ARTIFACT_DIR="${ARTIFACT_DIR:-${REPO_ROOT}/benchmark_artifacts}"
+export MODEL_PACKAGE="${MODEL_PACKAGE:-${ARTIFACT_DIR}/models/NequIP-OAM-L-0.1.nequip.zip}"
+export COMPILED_MODEL="${COMPILED_MODEL:-${ARTIFACT_DIR}/NequIP-OAM-L-0.1-ase-oeq-no-cg.nequip.pt2}"
 export OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/benchmark_results/nequip_e0_e1_b0_b1}"
 export VALIDATION_DIR="${VALIDATION_DIR:-${OUTPUT_DIR}/validation}"
 export REQUIRE_VALIDATION="${REQUIRE_VALIDATION:-1}"
@@ -32,12 +33,17 @@ artifact_hash() {
 
 MAX_CONCURRENT="${MAX_CONCURRENT:-8}"
 
-for required_path in "${SYSTEMS_FILE}" "${MODEL_PACKAGE}"; do
+for required_path in "${SYSTEMS_FILE}"; do
     if [[ ! -e "${required_path}" ]]; then
         echo "Required path not found: ${required_path}" >&2
         exit 2
     fi
 done
+if [[ ! -e "${MODEL_PACKAGE}" && -z "${VALIDATION_JOB_ID:-}" ]]; then
+    echo "Official model package not found: ${MODEL_PACKAGE}" >&2
+    echo "Run compilation first, or provide VALIDATION_JOB_ID for an afterok dependency." >&2
+    exit 2
+fi
 
 # In the complete pipeline this script runs immediately after submitting the
 # compile and validation jobs. The AOTI artifact does not exist on the submit

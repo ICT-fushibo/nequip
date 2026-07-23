@@ -22,7 +22,10 @@ The scripts default to:
 repository:
   /share/home/fushibo/MD_opt/nequip
 model package:
-  /share/home/fushibo/NequIP-OAM-L-0.1.nequip.zip
+  nequip.net:mir-group/NequIP-OAM-L:0.1
+downloaded package:
+  /share/home/fushibo/MD_opt/nequip/benchmark_artifacts/models/
+  NequIP-OAM-L-0.1.nequip.zip
 compiled artifact:
   /share/home/fushibo/MD_opt/nequip/benchmark_artifacts/
   NequIP-OAM-L-0.1-ase-oeq-no-cg.nequip.pt2
@@ -84,6 +87,13 @@ On Slurm:
 ```bash
 bash benchmarks/nequip_md/submit_compile_slurm.sh
 ```
+
+The compile job fetches `nequip.net:mir-group/NequIP-OAM-L:0.1`, verifies the
+downloaded ZIP, and copies it to the stable package path above. E0/E1 and
+B0/B1 therefore use the exact same official package. AOTInductor writes to a
+temporary `.nequip.pt2`; the script publishes the formal artifact only after
+NequIP's eager-versus-AOTI numerical check succeeds. Reuse requires valid
+artifact and source-model checksums.
 
 All Slurm jobs use the fixed cluster setup:
 
