@@ -82,16 +82,27 @@ CUDA_VISIBLE_DEVICES=1 WITH_CONSTANT_FOLD=1 \
 Do not mix the constant-fold and non-constant-fold artifacts within one
 E0/E1/B0/B1 comparison.
 
-On Slurm:
+Because cluster compute nodes are offline, download the official package once
+on an internet-connected login node before submitting Slurm jobs:
+
+```bash
+python benchmarks/nequip_md/fetch_official_model.py \
+  --source nequip.net:mir-group/NequIP-OAM-L:0.1 \
+  --output benchmark_artifacts/models/NequIP-OAM-L-0.1.nequip.zip
+```
+
+Then submit compilation:
 
 ```bash
 bash benchmarks/nequip_md/submit_compile_slurm.sh
 ```
 
-The compile job fetches `nequip.net:mir-group/NequIP-OAM-L:0.1`, verifies the
-downloaded ZIP, and copies it to the stable package path above. E0/E1 and
-B0/B1 therefore use the exact same official package. AOTInductor writes to a
-temporary `.nequip.pt2`; the script publishes the formal artifact only after
+The download command fetches `nequip.net:mir-group/NequIP-OAM-L:0.1`, verifies
+the ZIP, and records its source plus SHA256 at the stable package path above.
+Slurm submission and compute jobs use `--verify-only`, so they never access the
+network and reject a missing, modified, or differently sourced package. E0/E1
+and B0/B1 therefore use the exact same official package. AOTInductor writes to
+a temporary `.nequip.pt2`; the script publishes the formal artifact only after
 NequIP's eager-versus-AOTI numerical check succeeds. Reuse requires valid
 artifact and source-model checksums.
 

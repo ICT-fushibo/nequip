@@ -11,8 +11,6 @@ import shutil
 import tempfile
 import zipfile
 
-from nequip.model.saved_models.load_utils import _get_model_file_path
-
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -41,10 +39,20 @@ def main() -> None:
         help="Official nequip.net model identifier",
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--verify-only",
+        action="store_true",
+        help="Verify the previously downloaded package without network access",
+    )
     args = parser.parse_args()
 
     target = args.output.expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
+    if args.verify_only:
+        verify_local_package(target, args.source)
+        return
+
+    from nequip.model.saved_models.load_utils import _get_model_file_path
 
     # NequIP verifies the repository response and maintains its own download
     # cache. Copy that exact artifact to a predictable path used by E0/E1/B0/B1.
@@ -71,9 +79,41 @@ def main() -> None:
 
     checksum_path = Path(f"{target}.sha256")
     checksum_path.write_text(f"{source_hash}  {target}\n", encoding="utf-8")
+    source_path = Path(f"{target}.source")
+    source_path.write_text(f"{args.source}\n", encoding="utf-8")
     print(f"Official model source: {args.source}")
     print(f"Official model path: {target}")
     print(f"Official model SHA256: {source_hash}")
+
+
+def verify_local_package(target: Path, expected_source: str) -> None:
+    checksum_path = Path(f"{target}.sha256")
+    source_path = Path(f"{target}.source")
+    for required_path in (target, checksum_path, source_path):
+        if not required_path.is_file():
+            raise FileNotFoundError(
+                f"Official model prerequisite is missing: {required_path}\n"
+                "Run fetch_official_model.py on an internet-connected login node."
+            )
+
+    recorded_source = source_path.read_text(encoding="utf-8").strip()
+    if recorded_source != expected_source:
+        raise RuntimeError(
+            f"Model source mismatch: expected {expected_source!r}, "
+            f"found {recorded_source!r}"
+        )
+
+    expected_hash = checksum_path.read_text(encoding="utf-8").split()[0]
+    actual_hash = sha256(target)
+    if actual_hash != expected_hash:
+        raise RuntimeError(
+            f"Model checksum mismatch for {target}: "
+            f"expected {expected_hash}, found {actual_hash}"
+        )
+    validate_package(target)
+    print(f"Verified offline model source: {recorded_source}")
+    print(f"Verified offline model path: {target}")
+    print(f"Verified offline model SHA256: {actual_hash}")
 
 
 def _copy_atomically(source: Path, target: Path) -> None:

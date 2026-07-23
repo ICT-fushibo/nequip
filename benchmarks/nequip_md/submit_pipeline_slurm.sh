@@ -22,7 +22,7 @@ export TEMPERATURE_K="${TEMPERATURE_K:-300.0}"
 export VELOCITY_MODE="${VELOCITY_MODE:-maxwell}"
 export SEED="${SEED:-20260722}"
 
-for required_path in "${SYSTEMS_FILE}"; do
+for required_path in "${SYSTEMS_FILE}" "${MODEL_PACKAGE}" "${MODEL_PACKAGE}.sha256" "${MODEL_PACKAGE}.source"; do
     if [[ ! -e "${required_path}" ]]; then
         echo "Required path not found: ${required_path}" >&2
         exit 2

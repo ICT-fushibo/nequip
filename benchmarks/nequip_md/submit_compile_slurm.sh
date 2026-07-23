@@ -12,6 +12,11 @@ export MODEL_PACKAGE="${MODEL_PACKAGE:-${ARTIFACT_DIR}/models/NequIP-OAM-L-0.1.n
 export WITH_CONSTANT_FOLD="${WITH_CONSTANT_FOLD:-0}"
 export BENCH_SCRIPT_DIR="${SCRIPT_DIR}"
 
+python "${SCRIPT_DIR}/fetch_official_model.py" \
+    --source "${MODEL_SOURCE}" \
+    --output "${MODEL_PACKAGE}" \
+    --verify-only >&2
+
 mkdir -p "${SLURM_LOG_DIR}"
 
 sbatch_args=(

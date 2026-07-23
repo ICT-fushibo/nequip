@@ -29,10 +29,11 @@ fi
 mkdir -p "$(dirname -- "${OUTPUT_MODEL}")" "$(dirname -- "${MODEL_PACKAGE}")"
 cd "${REPO_ROOT}"
 
-echo "Fetching official pretrained model"
+echo "Verifying pre-downloaded official model (offline)"
 python "${SCRIPT_DIR}/fetch_official_model.py" \
     --source "${MODEL_SOURCE}" \
-    --output "${MODEL_PACKAGE}"
+    --output "${MODEL_PACKAGE}" \
+    --verify-only
 
 if ! command -v sha256sum >/dev/null 2>&1; then
     echo "sha256sum is required to validate benchmark artifacts" >&2
