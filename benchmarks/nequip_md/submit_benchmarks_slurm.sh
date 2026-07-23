@@ -32,12 +32,25 @@ artifact_hash() {
 
 MAX_CONCURRENT="${MAX_CONCURRENT:-8}"
 
-for required_path in "${SYSTEMS_FILE}" "${MODEL_PACKAGE}" "${COMPILED_MODEL}"; do
+for required_path in "${SYSTEMS_FILE}" "${MODEL_PACKAGE}"; do
     if [[ ! -e "${required_path}" ]]; then
         echo "Required path not found: ${required_path}" >&2
         exit 2
     fi
 done
+
+# In the complete pipeline this script runs immediately after submitting the
+# compile and validation jobs. The AOTI artifact does not exist on the submit
+# host yet, but the afterok dependency guarantees that the benchmark cannot
+# start until validation (and therefore compilation) has completed.
+if [[ ! -e "${COMPILED_MODEL}" ]]; then
+    if [[ -z "${VALIDATION_JOB_ID:-}" ]]; then
+        echo "Compiled model not found: ${COMPILED_MODEL}" >&2
+        echo "Compile it first, or provide VALIDATION_JOB_ID for an afterok dependency." >&2
+        exit 2
+    fi
+    echo "Compiled model is pending dependency job ${VALIDATION_JOB_ID}: ${COMPILED_MODEL}" >&2
+fi
 
 if [[ "${REQUIRE_VALIDATION}" == "1" && -z "${VALIDATION_JOB_ID:-}" ]]; then
     while IFS=$'\t' read -r label structure _; do
@@ -50,8 +63,9 @@ if [[ "${REQUIRE_VALIDATION}" == "1" && -z "${VALIDATION_JOB_ID:-}" ]]; then
     done < "${SYSTEMS_FILE}"
 fi
 
-# Compute on the submit host once instead of hashing large artifacts inside
-# every array task while neighboring jobs are being timed.
+# Hash artifacts already present on the submit host. If the compiled artifact
+# is still being produced, slurm_benchmark.sbatch reads its .sha256 sidecar
+# after the dependency resolves and before starting any timed work.
 export MODEL_PACKAGE_SHA256="${MODEL_PACKAGE_SHA256:-$(artifact_hash "${MODEL_PACKAGE}")}"
 export COMPILED_MODEL_SHA256="${COMPILED_MODEL_SHA256:-$(artifact_hash "${COMPILED_MODEL}")}"
 

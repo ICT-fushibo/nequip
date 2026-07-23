@@ -57,6 +57,33 @@ if [[ "${REQUIRE_VALIDATION:-1}" == "1" && ! -f "${validation_path}" ]]; then
     echo "Validation result not found: ${validation_path}" >&2
     exit 2
 fi
+for required_model in "${MODEL_PACKAGE}" "${COMPILED_MODEL}"; do
+    if [[ ! -f "${required_model}" ]]; then
+        echo "Required model not found after dependencies resolved: ${required_model}" >&2
+        exit 2
+    fi
+done
+
+artifact_hash() {
+    local artifact="$1"
+    if [[ -f "${artifact}.sha256" ]]; then
+        awk 'NR == 1 {print $1}' "${artifact}.sha256"
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "${artifact}" | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
+# The compiled model may not have existed when the array was submitted. Load
+# its hash now, outside the timed region, after the compile dependency has
+# created both the artifact and its checksum sidecar.
+if [[ -z "${MODEL_PACKAGE_SHA256:-}" ]]; then
+    MODEL_PACKAGE_SHA256="$(artifact_hash "${MODEL_PACKAGE}")"
+fi
+if [[ -z "${COMPILED_MODEL_SHA256:-}" ]]; then
+    COMPILED_MODEL_SHA256="$(artifact_hash "${COMPILED_MODEL}")"
+fi
 
 mkdir -p "${OUTPUT_DIR}/json" "${OUTPUT_DIR}/logs"
 cd "${REPO_ROOT}"
