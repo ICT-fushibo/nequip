@@ -96,6 +96,13 @@ Conda:     /share/home/fushibo/software/miniconda3, environment nequip_opt
 logs:      /share/home/fushibo/MD_opt/nequip/log/
 ```
 
+Every Slurm stage sources `setup_slurm_env.sh`. It purges modules inherited
+from the submit shell, loads CUDA 12.8, derives `CUDA_HOME` from that module's
+`nvcc`, and rejects a missing CUDA header before launching Python. The compile
+dependency also builds the OpenEquivariance extension in a versioned shared
+`TORCH_EXTENSIONS_DIR`; validation and benchmark arrays reuse it instead of
+starting concurrent first-time JIT builds.
+
 ## Validate 1000-step trajectories before timing
 
 E0 is the numerical reference. Every mode starts from identical positions,

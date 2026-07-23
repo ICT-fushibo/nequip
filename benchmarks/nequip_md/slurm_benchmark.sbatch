@@ -7,15 +7,10 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --output=/share/home/fushibo/MD_opt/nequip/log/benchmark-%A_%a.log
 
-# Fixed cluster environment.
-source /etc/profile.d/modules.sh
-module load cuda/12.8
-source /share/home/fushibo/software/miniconda3/bin/activate nequip_opt
-
-set -euo pipefail
-
 : "${BENCH_SCRIPT_DIR:?BENCH_SCRIPT_DIR must be exported by submit_benchmarks_slurm.sh}"
 SCRIPT_DIR="${BENCH_SCRIPT_DIR}"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/setup_slurm_env.sh"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 
 : "${SYSTEMS_FILE:?SYSTEMS_FILE must be exported by submit_benchmarks_slurm.sh}"
