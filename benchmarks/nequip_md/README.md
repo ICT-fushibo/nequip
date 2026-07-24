@@ -48,8 +48,8 @@ One compatible pinned environment can be created on the login node with:
 ```bash
 conda create -n nequip_opt_py312 python=3.12 pip -y
 conda activate nequip_opt_py312
-python -m pip install torch==2.9.0 \
-  --index-url https://download.pytorch.org/whl/cu126
+python -m pip install torch==2.10.0 \
+  --index-url https://download.pytorch.org/whl/cu128
 python -m pip install -e /share/home/fushibo/MD_opt/nequip
 python -m pip install \
   openequivariance==0.6.8 \
@@ -59,6 +59,10 @@ python benchmarks/nequip_md/check_b1_dependencies.py
 
 Submit with `NEQUIP_CONDA_ENV=nequip_opt_py312`. Do not use pip's
 `--ignore-requires-python` to force nvalchemiops into Python 3.10.
+Torch 2.10 with the CUDA 12.8 wheel is used intentionally: OpenEquivariance
+0.6.8 warns that Torch 2.9 is below the minimum for its precompiled extension,
+and repeated clean AOTInductor builds under that JIT fallback were not
+numerically reproducible.
 
 ## Structure manifest
 
