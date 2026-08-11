@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import random
 import socket
 import subprocess
 import sys
@@ -25,6 +26,7 @@ if (REPO_ROOT / "nequip").is_dir():
 import ase
 from ase import units
 from ase.io import read
+from ase.md.nvtberendsen import NVTBerendsen
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 from ase.md.verlet import VelocityVerlet
 import nequip
@@ -50,6 +52,8 @@ MODE_SPECS = {
         "neighborlist_backend": "alchemiops",
     },
 }
+
+ENERGY_CHECKPOINTS = (1, 50, 100, 1000)
 
 
 def build_calculator(
@@ -143,6 +147,7 @@ def prepare_velocities(atoms, velocity_mode: str, temperature_k: float, seed: in
         MaxwellBoltzmannDistribution(
             atoms,
             temperature_K=temperature_k,
+            force_temp=True,
             rng=rng,
         )
         Stationary(atoms)
@@ -155,6 +160,42 @@ def prepare_velocities(atoms, velocity_mode: str, temperature_k: float, seed: in
             )
     else:
         raise ValueError(f"Unsupported velocity mode: {velocity_mode}")
+
+
+def seed_everything(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+
+def build_dynamics(
+    atoms,
+    *,
+    ensemble: str,
+    timestep_fs: float,
+    temperature_k: float,
+    taut_fs: float,
+):
+    common = {
+        "atoms": atoms,
+        "timestep": timestep_fs * units.fs,
+        "logfile": None,
+        "trajectory": None,
+    }
+    if ensemble == "nve":
+        return VelocityVerlet(**common)
+    if ensemble == "nvt":
+        return NVTBerendsen(
+            **common,
+            temperature_K=temperature_k,
+            taut=taut_fs * units.fs,
+        )
+    raise ValueError(f"Unsupported ensemble: {ensemble}")
 
 
 def capture_atoms_state(atoms) -> dict[str, np.ndarray]:
@@ -202,6 +243,9 @@ def load_numerical_validation(
     structure_index: int,
     timestep_fs: float,
     temperature_k: float,
+    ensemble: str,
+    thermostat: str,
+    taut_fs: float,
     velocity_mode: str,
     seed: int,
     model_package: str | None,
@@ -229,6 +273,9 @@ def load_numerical_validation(
         "structure_index": structure_index,
         "timestep_fs": timestep_fs,
         "temperature_initialization_k": temperature_k,
+        "ensemble": ensemble,
+        "thermostat": thermostat,
+        "taut_fs": taut_fs,
         "velocity_mode": velocity_mode,
         "seed": seed,
     }
@@ -289,6 +336,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup-steps", type=int, default=3)
     parser.add_argument("--timestep-fs", type=float, default=1.0)
     parser.add_argument("--temperature-k", type=float, default=300.0)
+    parser.add_argument("--ensemble", choices=("nve", "nvt"), default="nvt")
+    parser.add_argument("--thermostat", choices=("none", "berendsen"), default="berendsen")
+    parser.add_argument("--taut-fs", type=float, default=100.0)
     parser.add_argument(
         "--velocity-mode",
         choices=("maxwell", "keep", "zero"),
@@ -323,6 +373,14 @@ def main() -> int:
         raise ValueError("--warmup-steps cannot be negative")
     if args.timestep_fs <= 0:
         raise ValueError("--timestep-fs must be positive")
+    if args.temperature_k <= 0:
+        raise ValueError("--temperature-k must be positive")
+    if args.taut_fs <= 0:
+        raise ValueError("--taut-fs must be positive")
+    if args.ensemble == "nvt" and args.thermostat != "berendsen":
+        raise ValueError("NVT requires --thermostat=berendsen")
+    if args.ensemble == "nve" and args.thermostat != "none":
+        raise ValueError("NVE requires --thermostat=none")
     if not torch.cuda.is_available() and args.device.startswith("cuda"):
         raise RuntimeError("CUDA was requested but torch.cuda.is_available() is False")
 
@@ -345,6 +403,7 @@ def main() -> int:
     if np.any(atoms.get_masses() <= 0):
         raise ValueError("All atoms must have positive masses for MD")
 
+    seed_everything(args.seed)
     prepare_velocities(
         atoms,
         velocity_mode=args.velocity_mode,
@@ -373,11 +432,12 @@ def main() -> int:
 
     warmup_start = time.perf_counter()
     if args.warmup_steps:
-        warmup_dynamics = VelocityVerlet(
+        warmup_dynamics = build_dynamics(
             atoms,
-            timestep=args.timestep_fs * units.fs,
-            logfile=None,
-            trajectory=None,
+            ensemble=args.ensemble,
+            timestep_fs=args.timestep_fs,
+            temperature_k=args.temperature_k,
+            taut_fs=args.taut_fs,
         )
         warmup_dynamics.run(args.warmup_steps)
         torch.cuda.synchronize()
@@ -385,17 +445,32 @@ def main() -> int:
 
     # Warmup must not change the initial state used by the measured trajectory.
     restore_atoms_state(atoms, initial_state)
-    dynamics = VelocityVerlet(
+    dynamics = build_dynamics(
         atoms,
-        timestep=args.timestep_fs * units.fs,
-        logfile=None,
-        trajectory=None,
+        ensemble=args.ensemble,
+        timestep_fs=args.timestep_fs,
+        temperature_k=args.temperature_k,
+        taut_fs=args.taut_fs,
     )
 
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()
-    dynamics.run(args.steps)
+    checkpoint_energies: dict[str, dict[str, float]] = {}
+    completed_steps = 0
+    for checkpoint in (step for step in ENERGY_CHECKPOINTS if step <= args.steps):
+        dynamics.run(checkpoint - completed_steps)
+        potential_energy = float(atoms.get_potential_energy())
+        kinetic_energy = float(atoms.get_kinetic_energy())
+        checkpoint_energies[str(checkpoint)] = {
+            "potential_energy_ev": potential_energy,
+            "kinetic_energy_ev": kinetic_energy,
+            "total_md_energy_ev": potential_energy + kinetic_energy,
+            "temperature_k": float(atoms.get_temperature()),
+        }
+        completed_steps = checkpoint
+    if completed_steps < args.steps:
+        dynamics.run(args.steps - completed_steps)
     torch.cuda.synchronize()
     elapsed_seconds = time.perf_counter() - start
 
@@ -411,6 +486,7 @@ def main() -> int:
     selected_model_hash = args.model_sha256
     if selected_model_hash is None and not args.skip_model_hash:
         selected_model_hash = sha256_path(str(Path(model_for_mode).expanduser()))
+    structure_hash = sha256_path(str(structure_path))
 
     system_label = args.system_label or structure_path.stem
     numerical_validation = load_numerical_validation(
@@ -421,6 +497,9 @@ def main() -> int:
         structure_index=args.structure_index,
         timestep_fs=args.timestep_fs,
         temperature_k=args.temperature_k,
+        ensemble=args.ensemble,
+        thermostat=args.thermostat,
+        taut_fs=args.taut_fs,
         velocity_mode=args.velocity_mode,
         seed=args.seed,
         model_package=args.model_package,
@@ -428,7 +507,7 @@ def main() -> int:
     )
 
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": args.mode,
         **MODE_SPECS[args.mode],
         "system_label": system_label,
@@ -445,6 +524,11 @@ def main() -> int:
         "warmup_seconds": warmup_seconds,
         "timestep_fs": args.timestep_fs,
         "temperature_initialization_k": args.temperature_k,
+        "temperature_target_k": args.temperature_k,
+        "temperature_K": args.temperature_k,
+        "ensemble": args.ensemble,
+        "thermostat": args.thermostat,
+        "taut_fs": args.taut_fs,
         "velocity_mode": args.velocity_mode,
         "seed": args.seed,
         "repeat": args.repeat,
@@ -464,6 +548,9 @@ def main() -> int:
         ),
         "final_energy_ev": finite_or_none(final_energy_ev),
         "final_temperature_k": finite_or_none(final_temperature_k),
+        "checkpoint_energies": checkpoint_energies,
+        "structure_sha256": structure_hash,
+        "energy_reference_role": "baseline" if args.mode == "E0" else "candidate",
         "peak_cuda_memory_allocated_bytes": peak_allocated,
         "peak_cuda_memory_reserved_bytes": peak_reserved,
         "numerical_validation": numerical_validation,
@@ -479,6 +566,11 @@ def main() -> int:
         "nequip_version": nequip.__version__,
         "nequip_git_revision": git_revision(),
     }
+    for step in ENERGY_CHECKPOINTS:
+        checkpoint = checkpoint_energies.get(str(step))
+        result[f"energy_step_{step}_eV"] = (
+            checkpoint["potential_energy_ev"] if checkpoint is not None else None
+        )
 
     rendered = json.dumps(result, indent=2, sort_keys=True)
     if args.output is not None:

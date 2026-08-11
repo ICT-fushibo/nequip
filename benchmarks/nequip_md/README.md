@@ -1,8 +1,13 @@
 # NequIP E0/E1/B0/B1 MD benchmark
 
-This directory implements four ASE velocity-Verlet baselines with the same
+This directory implements four ASE MD baselines with the same
 structures, initial velocities, timestep, warmup, production steps, and output
 format.
+
+The production reference configuration matches the eSEN and MatRIS baselines:
+ASE `NVTBerendsen`, timestep 1 fs, `taut=100 fs`, Maxwell-Boltzmann velocities
+with `force_temp=True`, seed 42, and target temperatures 300 K and 800 K. The
+benchmark also retains an explicit NVE mode for diagnostics.
 
 | Mode | Model execution | Neighbor list | Offline compilation |
 | --- | --- | --- | --- |
@@ -184,8 +189,8 @@ code from an earlier failed job cannot affect numerical validation.
 ## Validate 1000-step trajectories before timing
 
 E0 is the numerical reference. Every mode starts from identical positions,
-momenta, cell, PBC, timestep, and velocity-Verlet settings, then independently
-runs all 1000 steps. The absolute error is the difference in total model
+momenta, cell, PBC, timestep, and thermostat settings, then independently runs
+all 1000 steps. The absolute error is the difference in total model
 potential energy in eV; it is not divided by the number of atoms.
 
 Required checkpoints:

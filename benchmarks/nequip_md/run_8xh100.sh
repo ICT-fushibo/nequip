@@ -12,11 +12,15 @@ VALIDATION_DIR="${VALIDATION_DIR:-${OUTPUT_DIR}/validation}"
 REQUIRE_VALIDATION="${REQUIRE_VALIDATION:-1}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 NGPUS="${NGPUS:-8}"
+GPU_ID="${GPU_ID:-}"
 REPEATS="${REPEATS:-5}"
 STEPS="${STEPS:-1000}"
 WARMUP_STEPS="${WARMUP_STEPS:-3}"
 TIMESTEP_FS="${TIMESTEP_FS:-1.0}"
 TEMPERATURE_K="${TEMPERATURE_K:-300.0}"
+ENSEMBLE="${ENSEMBLE:-nvt}"
+THERMOSTAT="${THERMOSTAT:-berendsen}"
+TAUT_FS="${TAUT_FS:-100.0}"
 VELOCITY_MODE="${VELOCITY_MODE:-maxwell}"
 SEED="${SEED:-42}"
 
@@ -53,6 +57,10 @@ if ! [[ "${NGPUS}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 if ! [[ "${REPEATS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "REPEATS must be a positive integer, got: ${REPEATS}" >&2
+    exit 2
+fi
+if [[ -n "${GPU_ID}" && "${NGPUS}" != "1" ]]; then
+    echo "GPU_ID can only be used with NGPUS=1" >&2
     exit 2
 fi
 
@@ -102,26 +110,30 @@ mode_order() {
 }
 
 run_worker() {
-    local gpu="$1"
+    local worker_index="$1"
+    local physical_gpu="${worker_index}"
     local group_index system_index repeat label structure order mode
     local output_path log_path validation_path cpuset_var cpuset selected_hash
     local -a bench_command
 
-    cpuset_var="CPUSET_${gpu}"
+    if [[ -n "${GPU_ID}" ]]; then
+        physical_gpu="${GPU_ID}"
+    fi
+    cpuset_var="CPUSET_${physical_gpu}"
     cpuset="${!cpuset_var:-}"
     if [[ -n "${cpuset}" ]] && ! command -v taskset >/dev/null 2>&1; then
         echo "${cpuset_var} is set, but taskset is unavailable" >&2
         return 2
     fi
 
-    for ((group_index = gpu; group_index < ${#TASK_GROUPS[@]}; group_index += NGPUS)); do
+    for ((group_index = worker_index; group_index < ${#TASK_GROUPS[@]}; group_index += NGPUS)); do
         IFS=$'\t' read -r system_index label structure <<< "${TASK_GROUPS[group_index]}"
         validation_path="${VALIDATION_DIR}/${label}.json"
         for ((repeat = 0; repeat < REPEATS; repeat++)); do
             order="$(mode_order "$((repeat + system_index))")"
             for mode in ${order}; do
                 output_path="${OUTPUT_DIR}/json/${label}.${mode}.repeat${repeat}.json"
-                log_path="${OUTPUT_DIR}/logs/${label}.${mode}.repeat${repeat}.gpu${gpu}.log"
+                log_path="${OUTPUT_DIR}/logs/${label}.${mode}.repeat${repeat}.gpu${physical_gpu}.log"
                 if [[ "${mode}" == "E0" || "${mode}" == "E1" ]]; then
                     selected_hash="${MODEL_PACKAGE_SHA256}"
                 else
@@ -138,6 +150,9 @@ run_worker() {
                     --warmup-steps "${WARMUP_STEPS}"
                     --timestep-fs "${TIMESTEP_FS}"
                     --temperature-k "${TEMPERATURE_K}"
+                    --ensemble "${ENSEMBLE}"
+                    --thermostat "${THERMOSTAT}"
+                    --taut-fs "${TAUT_FS}"
                     --velocity-mode "${VELOCITY_MODE}"
                     --seed "${SEED}"
                     --repeat "${repeat}"
@@ -151,11 +166,11 @@ run_worker() {
                 else
                     bench_command+=(--skip-model-hash)
                 fi
-                echo "GPU ${gpu}: ${label} repeat=${repeat} mode=${mode}"
+                echo "GPU ${physical_gpu}: ${label} repeat=${repeat} mode=${mode}"
                 if [[ -n "${cpuset}" ]]; then
-                    CUDA_VISIBLE_DEVICES="${gpu}" taskset -c "${cpuset}" "${bench_command[@]}" >"${log_path}" 2>&1
+                    CUDA_VISIBLE_DEVICES="${physical_gpu}" taskset -c "${cpuset}" "${bench_command[@]}" >"${log_path}" 2>&1
                 else
-                    CUDA_VISIBLE_DEVICES="${gpu}" "${bench_command[@]}" >"${log_path}" 2>&1
+                    CUDA_VISIBLE_DEVICES="${physical_gpu}" "${bench_command[@]}" >"${log_path}" 2>&1
                 fi
             done
         done
@@ -163,8 +178,8 @@ run_worker() {
 }
 
 worker_pids=()
-for ((gpu = 0; gpu < NGPUS; gpu++)); do
-    run_worker "${gpu}" &
+for ((worker_index = 0; worker_index < NGPUS; worker_index++)); do
+    run_worker "${worker_index}" &
     worker_pids+=("$!")
 done
 

@@ -8,13 +8,17 @@ import json
 from pathlib import Path
 import sys
 
-from ase import units
 from ase.io import read
-from ase.md.verlet import VelocityVerlet
 import numpy as np
 import torch
 
-from benchmark_md import MODE_SPECS, build_calculator, prepare_velocities
+from benchmark_md import (
+    MODE_SPECS,
+    build_calculator,
+    build_dynamics,
+    prepare_velocities,
+    seed_everything,
+)
 
 
 CHECKPOINTS = (1, 50, 100, 1000)
@@ -30,6 +34,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compiled-model", required=True)
     parser.add_argument("--timestep-fs", type=float, default=1.0)
     parser.add_argument("--temperature-k", type=float, default=300.0)
+    parser.add_argument("--ensemble", choices=("nve", "nvt"), default="nvt")
+    parser.add_argument(
+        "--thermostat", choices=("none", "berendsen"), default="berendsen"
+    )
+    parser.add_argument("--taut-fs", type=float, default=100.0)
     parser.add_argument(
         "--velocity-mode",
         choices=("maxwell", "keep", "zero"),
@@ -46,6 +55,9 @@ def evaluate_trajectory(
     model_package: str,
     compiled_model: str,
     timestep_fs: float,
+    temperature_k: float,
+    ensemble: str,
+    taut_fs: float,
 ) -> dict:
     """Run all 1000 steps even when an early checkpoint later fails."""
     atoms = initial_atoms.copy()
@@ -63,11 +75,12 @@ def evaluate_trajectory(
     initial_stress = np.asarray(atoms.get_stress(voigt=False), dtype=np.float64)
     torch.cuda.synchronize()
 
-    dynamics = VelocityVerlet(
+    dynamics = build_dynamics(
         atoms,
-        timestep=timestep_fs * units.fs,
-        logfile=None,
-        trajectory=None,
+        ensemble=ensemble,
+        timestep_fs=timestep_fs,
+        temperature_k=temperature_k,
+        taut_fs=taut_fs,
     )
     checkpoint_values = {}
     previous_step = 0
@@ -104,8 +117,17 @@ def main() -> int:
     args = parse_args()
     if args.timestep_fs <= 0:
         raise ValueError("--timestep-fs must be positive")
+    if args.temperature_k <= 0:
+        raise ValueError("--temperature-k must be positive")
+    if args.taut_fs <= 0:
+        raise ValueError("--taut-fs must be positive")
+    if args.ensemble == "nvt" and args.thermostat != "berendsen":
+        raise ValueError("NVT requires --thermostat=berendsen")
+    if args.ensemble == "nve" and args.thermostat != "none":
+        raise ValueError("NVE requires --thermostat=none")
     structure_path = Path(args.structure).expanduser().resolve()
     atoms = read(structure_path, index=args.structure_index)
+    seed_everything(args.seed)
     prepare_velocities(
         atoms,
         velocity_mode=args.velocity_mode,
@@ -122,6 +144,9 @@ def main() -> int:
             model_package=args.model_package,
             compiled_model=args.compiled_model,
             timestep_fs=args.timestep_fs,
+            temperature_k=args.temperature_k,
+            ensemble=args.ensemble,
+            taut_fs=args.taut_fs,
         )
 
     reference = predictions["E0"]
@@ -230,6 +255,10 @@ def main() -> int:
         "compiled_model": str(Path(args.compiled_model).expanduser().resolve()),
         "timestep_fs": args.timestep_fs,
         "temperature_initialization_k": args.temperature_k,
+        "temperature_target_k": args.temperature_k,
+        "ensemble": args.ensemble,
+        "thermostat": args.thermostat,
+        "taut_fs": args.taut_fs,
         "velocity_mode": args.velocity_mode,
         "seed": args.seed,
         "energy_error_definition": (
@@ -237,8 +266,8 @@ def main() -> int:
             "not normalized by atom count"
         ),
         "trajectory_comparison": (
-            "each mode runs an independent velocity-Verlet trajectory from the "
-            "identical initial positions and momenta"
+            f"each mode runs an independent {args.ensemble.upper()} trajectory "
+            "from identical initial positions and momenta"
         ),
         "checkpoints": list(CHECKPOINTS),
         "required_abs_error_lt_ev": {

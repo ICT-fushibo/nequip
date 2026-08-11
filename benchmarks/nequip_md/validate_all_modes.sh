@@ -12,6 +12,9 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 GPU_ID="${GPU_ID:-0}"
 TIMESTEP_FS="${TIMESTEP_FS:-1.0}"
 TEMPERATURE_K="${TEMPERATURE_K:-300.0}"
+ENSEMBLE="${ENSEMBLE:-nvt}"
+THERMOSTAT="${THERMOSTAT:-berendsen}"
+TAUT_FS="${TAUT_FS:-100.0}"
 VELOCITY_MODE="${VELOCITY_MODE:-maxwell}"
 SEED="${SEED:-42}"
 
@@ -43,6 +46,9 @@ while IFS=$'\t' read -r label structure _; do
         --compiled-model "${COMPILED_MODEL}" \
         --timestep-fs "${TIMESTEP_FS}" \
         --temperature-k "${TEMPERATURE_K}" \
+        --ensemble "${ENSEMBLE}" \
+        --thermostat "${THERMOSTAT}" \
+        --taut-fs "${TAUT_FS}" \
         --velocity-mode "${VELOCITY_MODE}" \
         --seed "${SEED}" \
         --output "${VALIDATION_DIR}/${label}.json"

@@ -69,6 +69,26 @@ def main() -> int:
             milliseconds = [float(r["milliseconds_per_step"]) for r in mode_records]
             mode_summary = summary(milliseconds)
             mode_summary["n_atoms"] = int(mode_records[0]["n_atoms"])
+            temperature_values = sorted(
+                {
+                    float(
+                        record.get(
+                            "temperature_target_k",
+                            record.get("temperature_initialization_k"),
+                        )
+                    )
+                    for record in mode_records
+                }
+            )
+            mode_summary["temperature_k"] = temperature_values
+            checkpoint_energies = mode_records[0].get("checkpoint_energies", {})
+            checkpoint_potential_energies = {
+                step: values.get("potential_energy_ev")
+                for step, values in checkpoint_energies.items()
+            }
+            mode_summary["checkpoint_potential_energy_ev"] = (
+                checkpoint_potential_energies
+            )
             mode_summary["model_hashes"] = sorted(
                 {
                     value
@@ -101,6 +121,9 @@ def main() -> int:
                 {
                     "system": system,
                     "n_atoms": mode_summary["n_atoms"],
+                    "temperature_k": ";".join(
+                        f"{value:g}" for value in temperature_values
+                    ),
                     "mode": mode,
                     "count": mode_summary["count"],
                     "median_ms_per_step": mode_summary["median"],
@@ -121,6 +144,18 @@ def main() -> int:
                     ),
                     "step1000_potential_energy_abs_error_ev": (
                         checkpoint_errors.get("1000") if checkpoint_errors else None
+                    ),
+                    "step1_potential_energy_ev": checkpoint_potential_energies.get(
+                        "1"
+                    ),
+                    "step50_potential_energy_ev": checkpoint_potential_energies.get(
+                        "50"
+                    ),
+                    "step100_potential_energy_ev": checkpoint_potential_energies.get(
+                        "100"
+                    ),
+                    "step1000_potential_energy_ev": checkpoint_potential_energies.get(
+                        "1000"
                     ),
                 }
             )
