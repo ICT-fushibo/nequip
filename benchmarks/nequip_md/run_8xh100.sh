@@ -18,7 +18,7 @@ WARMUP_STEPS="${WARMUP_STEPS:-3}"
 TIMESTEP_FS="${TIMESTEP_FS:-1.0}"
 TEMPERATURE_K="${TEMPERATURE_K:-300.0}"
 VELOCITY_MODE="${VELOCITY_MODE:-maxwell}"
-SEED="${SEED:-20260722}"
+SEED="${SEED:-42}"
 
 artifact_hash() {
     local artifact="$1"

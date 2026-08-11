@@ -13,7 +13,7 @@ export VALIDATION_DIR="${VALIDATION_DIR:-${OUTPUT_DIR}/validation}"
 export TIMESTEP_FS="${TIMESTEP_FS:-1.0}"
 export TEMPERATURE_K="${TEMPERATURE_K:-300.0}"
 export VELOCITY_MODE="${VELOCITY_MODE:-maxwell}"
-export SEED="${SEED:-20260722}"
+export SEED="${SEED:-42}"
 export NEQUIP_CONDA_ENV="${NEQUIP_CONDA_ENV:-nequip_opt}"
 export BENCH_SCRIPT_DIR="${SCRIPT_DIR}"
 

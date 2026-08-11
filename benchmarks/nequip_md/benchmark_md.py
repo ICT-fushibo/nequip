@@ -294,7 +294,7 @@ def parse_args() -> argparse.Namespace:
         choices=("maxwell", "keep", "zero"),
         default="maxwell",
     )
-    parser.add_argument("--seed", type=int, default=20260722)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--repeat", type=int, default=0)
     parser.add_argument("--output", default=None, help="JSON result path")
     parser.add_argument(
