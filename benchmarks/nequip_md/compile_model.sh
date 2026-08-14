@@ -10,9 +10,9 @@ MODEL_PACKAGE="${MODEL_PACKAGE:-${ARTIFACT_DIR}/models/NequIP-OAM-L-0.1.nequip.z
 WITH_CONSTANT_FOLD="${WITH_CONSTANT_FOLD:-0}"
 
 if [[ "${WITH_CONSTANT_FOLD}" == "1" ]]; then
-    OUTPUT_MODEL="${OUTPUT_MODEL:-${ARTIFACT_DIR}/NequIP-OAM-L-0.1-ase-oeq-cf-no-cg.nequip.pt2}"
+    OUTPUT_MODEL="${OUTPUT_MODEL:-${ARTIFACT_DIR}/NequIP-OAM-L-0.1-torch211-cu126-sm90-ase-oeq-cf-no-cg.nequip.pt2}"
 else
-    OUTPUT_MODEL="${OUTPUT_MODEL:-${ARTIFACT_DIR}/NequIP-OAM-L-0.1-ase-oeq-no-cg.nequip.pt2}"
+    OUTPUT_MODEL="${OUTPUT_MODEL:-${ARTIFACT_DIR}/NequIP-OAM-L-0.1-torch211-cu126-sm90-ase-oeq-no-cg.nequip.pt2}"
 fi
 
 if [[ -n "${ENV_SETUP:-}" ]]; then
@@ -28,6 +28,11 @@ fi
 
 mkdir -p "$(dirname -- "${OUTPUT_MODEL}")" "$(dirname -- "${MODEL_PACKAGE}")"
 cd "${REPO_ROOT}"
+
+# AOTInductor artifacts and OpenEquivariance custom operations are build-
+# environment specific.  Do not accidentally reuse the old Torch 2.10/CUDA
+# 12.8 baseline environment or compile without a visible H100.
+python "${SCRIPT_DIR}/check_unified_environment.py" --require-accelerators
 
 echo "Verifying pre-downloaded official model (offline)"
 python "${SCRIPT_DIR}/fetch_official_model.py" \

@@ -6,7 +6,7 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 
 SYSTEMS_FILE="${SYSTEMS_FILE:-${SCRIPT_DIR}/systems.tsv}"
 MODEL_PACKAGE="${MODEL_PACKAGE:-${REPO_ROOT}/benchmark_artifacts/models/NequIP-OAM-L-0.1.nequip.zip}"
-COMPILED_MODEL="${COMPILED_MODEL:-${REPO_ROOT}/benchmark_artifacts/NequIP-OAM-L-0.1-ase-oeq-no-cg.nequip.pt2}"
+COMPILED_MODEL="${COMPILED_MODEL:-${REPO_ROOT}/benchmark_artifacts/NequIP-OAM-L-0.1-torch211-cu126-sm90-ase-oeq-no-cg.nequip.pt2}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/benchmark_results/nequip_e0_e1_b0_b1}"
 VALIDATION_DIR="${VALIDATION_DIR:-${OUTPUT_DIR}/validation}"
 REQUIRE_VALIDATION="${REQUIRE_VALIDATION:-1}"

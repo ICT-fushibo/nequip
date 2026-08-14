@@ -2,14 +2,14 @@
 # Shared Slurm environment for compile, validation, benchmark, and summary jobs.
 # The submit shell may already have another CUDA module loaded. Purging and
 # rebuilding CUDA_HOME from the selected nvcc prevents colon-joined paths such
-# as cuda-12.8:cuda-12.4 from reaching torch.utils.cpp_extension.
+# as cuda-12.8:cuda-12.6 from reaching torch.utils.cpp_extension.
 
 source /etc/profile.d/modules.sh || exit $?
 module purge || exit $?
 unset CUDA_HOME CUDA_PATH CUDACXX
-module load cuda/12.8 || exit $?
-NEQUIP_CONDA_ENV="${NEQUIP_CONDA_ENV:-nequip_opt}"
-source /share/home/fushibo/software/miniconda3/bin/activate "${NEQUIP_CONDA_ENV}" || exit $?
+module load cuda/12.6 || exit $?
+NEQUIP_CONDA_ENV="${NEQUIP_CONDA_ENV:-md_opt}"
+source /public-data/fushibo/miniconda3/bin/activate "${NEQUIP_CONDA_ENV}" || exit $?
 export NEQUIP_CONDA_ENV
 
 # Match the cluster template: enable strict mode only after modules and Conda
@@ -18,7 +18,7 @@ export NEQUIP_CONDA_ENV
 set -euo pipefail
 
 if ! NVCC_PATH="$(command -v nvcc)"; then
-    echo "nvcc is unavailable after loading cuda/12.8" >&2
+    echo "nvcc is unavailable after loading cuda/12.6" >&2
     exit 2
 fi
 NVCC_PATH="$(readlink -f "${NVCC_PATH}")"
@@ -53,7 +53,7 @@ raw = (
 print(re.sub(r"[^A-Za-z0-9_.-]", "_", raw))
 PY
 )"
-export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-/share/home/fushibo/.cache/torch_extensions/nequip_${EXTENSION_ABI_TAG}_cuda128}"
+export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-/public-data/fushibo/.cache/torch_extensions/nequip_${EXTENSION_ABI_TAG}_cuda126}"
 export MAX_JOBS="${MAX_JOBS:-${SLURM_CPUS_PER_TASK:-32}}"
 mkdir -p "${TORCH_EXTENSIONS_DIR}"
 

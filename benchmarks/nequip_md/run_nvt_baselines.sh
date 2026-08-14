@@ -6,7 +6,7 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
 MODEL_PACKAGE="${MODEL_PACKAGE:-NequIP-OAM-L-0.1.nequip.zip}"
-COMPILED_MODEL="${COMPILED_MODEL:-benchmark_artifacts/NequIP-OAM-L-0.1-ase-oeq-no-cg.nequip.pt2}"
+COMPILED_MODEL="${COMPILED_MODEL:-benchmark_artifacts/NequIP-OAM-L-0.1-torch211-cu126-sm90-ase-oeq-no-cg.nequip.pt2}"
 STRUCTURE_DIR="${STRUCTURE_DIR:-../MatRIS-09bk/example/cif_file}"
 RUN_ID="${RUN_ID:-nequip_nvt_baselines_$(date +%Y%m%d-%H%M%S)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-benchmark_results/${RUN_ID}}"

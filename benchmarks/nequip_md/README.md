@@ -1,5 +1,12 @@
 # NequIP E0/E1/B0/B1 MD benchmark
 
+> **Unified-runner note:** the shell benchmark/validation drivers in this
+> directory are retained for audit of the original E0/E1/B0/B1 work. They use
+> the historical `force_temp=True` plus `Stationary` initialization and must
+> not be mixed with the common project results. Formal Cu/H2O and DynaMat runs
+> use `run_md_test.py` / `run_md_matbench.py` and `nequip.md_route:run_md`, which
+> consume the shared `MDConfig` velocity, thermostat, and warmup semantics.
+
 This directory implements four ASE MD baselines with the same
 structures, initial velocities, timestep, warmup, production steps, and output
 format.
@@ -33,7 +40,7 @@ downloaded package:
   NequIP-OAM-L-0.1.nequip.zip
 compiled artifact:
   /share/home/fushibo/MD_opt/nequip/benchmark_artifacts/
-  NequIP-OAM-L-0.1-ase-oeq-no-cg.nequip.pt2
+  NequIP-OAM-L-0.1-torch211-cu126-sm90-ase-oeq-no-cg.nequip.pt2
 ```
 
 Run every command from the repository checkout. The active environment must
@@ -41,33 +48,34 @@ contain NequIP, ASE, matscipy, OpenEquivariance, and the alchemiops package used
 by NequIP's `alchemiops` neighbor-list backend.
 
 B1 specifically requires NVIDIA's `nvalchemi-toolkit-ops` distribution (import
-name `nvalchemiops`). Official releases require Python 3.11 or newer. Slurm
-defaults to the `nequip_opt` Conda environment; set
-`NEQUIP_CONDA_ENV=nequip_opt_py312` when using a separate Python 3.12 benchmark
-environment. Validation and performance jobs run `check_b1_dependencies.py`
-before loading structures so a missing GPU-neighbor-list dependency fails
-immediately rather than after E0/E1/B0 trajectories have completed.
-
-One compatible pinned environment can be created on the login node with:
+name `nvalchemiops`). Official releases require Python 3.11 or newer. The
+unified project environment is Python 3.12, PyTorch 2.11.0, and the CUDA 12.6
+PyTorch wheel. Install NequIP without allowing pip to replace that torch build:
 
 ```bash
-conda create -n nequip_opt_py312 python=3.12 pip -y
-conda activate nequip_opt_py312
-python -m pip install torch==2.10.0 \
-  --index-url https://download.pytorch.org/whl/cu128
-python -m pip install -e /share/home/fushibo/MD_opt/nequip
-python -m pip install \
-  openequivariance==0.6.8 \
-  nvalchemi-toolkit-ops==0.3.1
-python benchmarks/nequip_md/check_b1_dependencies.py
+conda activate md_opt
+export CUDA_HOME=/usr/local/cuda-12.6
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+export TORCH_CUDA_ARCH_LIST=9.0
+
+cd /public-data/fushibo/nequip
+python -m pip install -e . --no-build-isolation \
+  -c /public-data/fushibo/md-opt-constraints.txt
+python -m pip install openequivariance nvalchemi-toolkit-ops \
+  -c /public-data/fushibo/md-opt-constraints.txt
+
+python benchmarks/nequip_md/check_unified_environment.py
+python benchmarks/nequip_md/check_unified_environment.py --require-accelerators
 ```
 
-Submit with `NEQUIP_CONDA_ENV=nequip_opt_py312`. Do not use pip's
-`--ignore-requires-python` to force nvalchemiops into Python 3.10.
-Torch 2.10 with the CUDA 12.8 wheel is used intentionally: OpenEquivariance
-0.6.8 warns that Torch 2.9 is below the minimum for its precompiled extension,
-and repeated clean AOTInductor builds under that JIT fallback were not
-numerically reproducible.
+The source APIs accept this combination: NequIP 0.19 requires Torch >=2.2,
+OpenEquivariance requires Torch >=2.7, and NequIP supports the
+`nvalchemiops.torch.neighbors` API used by toolkit-ops >=0.3. This is only a
+static compatibility check. We have not run the server-side H100 AOTInductor
+compile under Torch 2.11/CUDA 12.6 yet; successful compilation plus the E0/B0/B1
+trajectory parity test is the acceptance criterion. Never reuse the old Torch
+2.10/CUDA 12.8 `.pt2` artifact in this environment.
 
 ## Structure manifest
 
@@ -172,13 +180,13 @@ All Slurm jobs use the fixed cluster setup:
 partition: h100
 GPU:       --gres=gpu:1
 CPU:       --cpus-per-task=32
-CUDA:      module load cuda/12.8
-Conda:     /share/home/fushibo/software/miniconda3, environment nequip_opt
-logs:      /share/home/fushibo/MD_opt/nequip/log/
+CUDA:      module load cuda/12.6
+Conda:     /public-data/fushibo/miniconda3, environment md_opt
+logs:      /public-data/fushibo/nequip/log/
 ```
 
 Every Slurm stage sources `setup_slurm_env.sh`. It purges modules inherited
-from the submit shell, loads CUDA 12.8, derives `CUDA_HOME` from that module's
+from the submit shell, loads CUDA 12.6, derives `CUDA_HOME` from that module's
 `nvcc`, and rejects a missing CUDA header before launching Python. The compile
 dependency also builds the OpenEquivariance extension in a versioned shared
 `TORCH_EXTENSIONS_DIR`; validation and benchmark arrays reuse it instead of
@@ -214,6 +222,103 @@ Initial force and stress differences are retained as diagnostics, but the pass
 decision follows the two trajectory-energy thresholds above. A numerical
 failure returns a successful process exit status so that performance testing
 continues and records the failed status.
+
+## Unified model-owned route
+
+The permanent outer runners use `nequip.md_route:run_md`. `--model-path`
+always names the official saved package, including for B0/B1. The AOTInductor
+artifact is passed separately so its provenance cannot be confused with the
+model weights:
+
+```text
+E0/eager: saved package + e3nn eager + matscipy, TF32 disabled
+E1/compile: saved package + torch.compile + matscipy, TF32 and CUDA Graphs disabled
+B0: saved-package provenance + AOTI/OpenEquivariance artifact + matscipy
+B1: same B0 artifact + alchemiops GPU neighbor list
+```
+
+E1/B0/B1 are retained engineering comparison modes; they are not renamed to
+project opt1/opt2/opt3 because those stage names have fixed meanings. Future
+stages continue to live in `nequip.md_stages.opt1` through `opt4`.
+
+Run the canonical E0 Cu/H2O baseline from the common project root:
+
+```bash
+cd /public-data/fushibo
+CUDA_VISIBLE_DEVICES=0 python run_md_test.py \
+  --model nequip \
+  --model-backend nequip.md_route:run_md \
+  --model-path /public-data/fushibo/checkpoints/nequip/NequIP-OAM-L-0.1.nequip.zip \
+  --stage baseline \
+  --backend E0 \
+  --structure-path /public-data/fushibo/md_test_data \
+  --temperature-k 300 800 \
+  --integrator berendsen \
+  --steps 1000 \
+  --warmup-steps 3 \
+  --timing-repeats 5 \
+  --output /public-data/fushibo/results/nequip/e0-cu-h2o
+```
+
+After compiling, B0/B1 use a JSON route option (the same artifact for both):
+
+```bash
+COMPILED=/public-data/fushibo/nequip/benchmark_artifacts/NequIP-OAM-L-0.1-torch211-cu126-sm90-ase-oeq-no-cg.nequip.pt2
+
+CUDA_VISIBLE_DEVICES=0 python run_md_test.py \
+  --model nequip \
+  --model-backend nequip.md_route:run_md \
+  --model-path /public-data/fushibo/checkpoints/nequip/NequIP-OAM-L-0.1.nequip.zip \
+  --stage baseline --backend B1 \
+  --route-options "{\"compiled_model_path\":\"$COMPILED\"}" \
+  --structure-path /public-data/fushibo/md_test_data/Cu16.cif \
+  --temperature-k 300 --steps 10 --observation-step 1 10 --warmup-steps 3 \
+  --output /public-data/fushibo/results/nequip/b1-smoke
+```
+
+Do the 10-step smoke for E0, E1, B0, and B1 first. Then run 1000 steps and
+compare step 1/50/100/1000 energy and force outputs before treating B0/B1 as
+usable engineering references.
+
+## Matbench DynaMat comparison
+
+The exact matching registry entry is `NequIP-OAM-L:0.1`; its leaderboard YAML
+is `models/nequip/nequip-oam-l-0.1.yml`. The published calculation uses a
+TorchScript `.nequip.pth` compiled from the registry model. Current NequIP
+explicitly rejects TorchScript compilation on Torch >=2.10, while the published
+YAML records Python 3.12, `torch<2.10`, and H200 hardware. Therefore the unified
+Torch 2.11/CUDA 12.6 E0 run uses the same official weights but is not a bitwise
+reproduction of the published execution artifact or runtime.
+
+The current official ZIP also records that it was packaged with NequIP 0.14.0,
+Torch 2.7.0+cu128, e3nn 0.5.6, and an OpenEquivariance development build. The
+package format is intended for loading by newer NequIP, but that metadata does
+not prove Torch 2.11 runtime compatibility; the E0 10-step smoke is mandatory.
+
+Run the common public-metric protocol with no warmup:
+
+```bash
+cd /public-data/fushibo
+CUDA_VISIBLE_DEVICES=0 python run_md_matbench.py \
+  --model nequip \
+  --model-backend nequip.md_route:run_md \
+  --model-path /public-data/fushibo/checkpoints/nequip/NequIP-OAM-L-0.1.nequip.zip \
+  --stage baseline \
+  --backend E0 \
+  --structure-path /public-data/fushibo/matbench-discovery-data/md/2026-06-29-dynamat-v1.0-reference-trajectories.h5 \
+  --matbench-repo /public-data/fushibo/matbench-discovery \
+  --leaderboard-model-yaml /public-data/fushibo/matbench-discovery/models/nequip/nequip-oam-l-0.1.yml \
+  --integrator nose_hoover_chain \
+  --steps 80000 --timestep-fs 0.25 --thermostat-time-fs 25 \
+  --warmup-steps 0 --record-interval 10 \
+  --output /public-data/fushibo/results/nequip/matbench-e0
+```
+
+Compare RDF, ADF, vDOS, and pressure metrics to the YAML. The public HDF5 does
+not contain the private energy/force labels, so its published energy RMSE and
+force RMSE can only be quoted, not recomputed. Chaotic trajectory divergence,
+H100 versus H200, Torch version, and eager versus TorchScript are expected to
+prevent exact equality even when the common protocol is correct.
 
 ## Regular 8xH100 server
 
