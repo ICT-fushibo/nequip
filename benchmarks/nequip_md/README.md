@@ -280,6 +280,58 @@ Do the 10-step smoke for E0, E1, B0, and B1 first. Then run 1000 steps and
 compare step 1/50/100/1000 energy and force outputs before treating B0/B1 as
 usable engineering references.
 
+## Project Opt1: GPU-resident eager MD
+
+`stage=opt1 --backend gpu-resident` uses the same official saved package and
+eager model semantics as E0, while moving the complete NVT state and neighbor
+construction to CUDA.  The implementation is
+`nequip.md_stages.opt1`; it uses the public
+`NequIPTorchSimCalc.from_saved_model(...)` entry point with the AlchemiOps
+neighbor list.  Positions, momenta, masses, forces, and both thermostat
+implementations are FP64 CUDA tensors.  Model parameters retain the dtype in
+the checkpoint.
+
+This stage intentionally rejects `.pt2` inputs and accelerated equivariance
+modules.  AOTInductor, OpenEquivariance, `torch.compile`, CUDA Graphs, TF32,
+and model-specific fusion are not Opt1.  If the official `.nequip.zip` cannot
+be restored by the installed NequIP/PyTorch combination, loading fails with
+the original exception chained; it never silently substitutes B0/B1.
+
+Install the editable repository and Opt1 runtime dependencies in `md_opt`:
+
+```bash
+cd /public-data/fushibo/nequip
+python -m pip install -e . --no-deps
+python -m pip install torch-sim-atomistic nvalchemi-toolkit-ops
+```
+
+Run an E0-versus-Opt1 10-step smoke on one GPU:
+
+```bash
+cd /public-data/fushibo
+CUDA_VISIBLE_DEVICES=0 python run_md_test.py \
+  --model nequip \
+  --model-backend nequip.md_route:run_md \
+  --model-path /public-data/fushibo/checkpoints/nequip/NequIP-OAM-L-0.1.nequip.zip \
+  --stage opt1 --backend gpu-resident --baseline-backend E0 \
+  --structure /public-data/fushibo/md_test_data/Cu16.cif \
+  --temperature-k 300 --integrator berendsen \
+  --steps 10 --warmup-steps 3 --observation-step 1 10 \
+  --timing-repeats 1 --dtype float64 --device cuda:0 \
+  --output /public-data/fushibo/outputs/opt1-smoke/nequip
+```
+
+The Opt1 acceptance tests cover one-step ASE 3.29 parity for Berendsen and
+Nose-Hoover-chain integration, retained baseline routing, later-stage policy
+exclusion, persistent TorchSim topology, and Matbench step-0 trajectory
+fields. Run them with the shared project root on `PYTHONPATH`:
+
+```bash
+cd /public-data/fushibo/nequip
+PYTHONPATH=/public-data/fushibo python -m pytest \
+  tests/unit/test_md_opt1.py -q
+```
+
 ## Matbench DynaMat comparison
 
 The exact matching registry entry is `NequIP-OAM-L:0.1`; its leaderboard YAML

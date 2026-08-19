@@ -155,24 +155,38 @@ class NequIPTorchSimCalc(_IntegrationLoaderMixin, ModelInterface):
                 "Atomic numbers cannot be provided in both the constructor and forward."
             )
 
-        # use system_idx from init if not provided
-        if sim_state.system_idx is None:
+        # Use immutable topology supplied at initialization without mutating
+        # SimState.  The previous implementation assigned into SimState and
+        # always forwarded ``sim_state.atomic_numbers`` even when atomic
+        # numbers were supplied to the constructor.  Apart from being
+        # inconsistent, the fallback made persistent GPU-resident states
+        # impossible to use without a per-forward ``torch.equal`` host sync.
+        system_idx = sim_state.system_idx
+        if system_idx is None:
             if not hasattr(self, "system_idx"):
                 raise ValueError(
                     "System indices must be provided if not set during initialization"
                 )
-            sim_state.system_idx = self.system_idx
+            system_idx = self.system_idx
+
+        atomic_numbers = sim_state.atomic_numbers
+        if atomic_numbers is None:
+            if not hasattr(self, "atomic_numbers"):
+                raise ValueError(
+                    "Atomic numbers must be provided if not set during initialization"
+                )
+            atomic_numbers = self.atomic_numbers
 
         # update batch information if new atomic numbers are provided
         if (
-            sim_state.atomic_numbers is not None
+            atomic_numbers is not None
             and not self.atomic_numbers_in_init
             and not torch.equal(
-                sim_state.atomic_numbers,
+                atomic_numbers,
                 getattr(self, "atomic_numbers", torch.zeros(0, device=self._device)),
             )
         ):
-            self.setup_from_system_idx(sim_state.atomic_numbers, sim_state.system_idx)
+            self.setup_from_system_idx(atomic_numbers, system_idx)
 
         # === prepare raw dict ===
         # convert PBC to tensor with shape [n_systems, 3] for batched data
@@ -182,17 +196,25 @@ class NequIPTorchSimCalc(_IntegrationLoaderMixin, ModelInterface):
         if isinstance(pbc, bool):
             # previously, pbc is a bool
             pbc = torch.tensor([pbc] * 3, dtype=torch.bool, device=self._device)
-        # after PR, pbc is already a tensor with shape [3]
-        # expand to [n_systems, 3] for batched processing
-        pbc_tensor = pbc.unsqueeze(0).expand(self.n_systems, 3)
+        # after PR, pbc is already a tensor with shape [3].  Accept the
+        # already-batched [n_systems, 3] representation as well.
+        if pbc.ndim == 1:
+            pbc_tensor = pbc.unsqueeze(0).expand(self.n_systems, 3)
+        elif pbc.ndim == 2 and tuple(pbc.shape) == (self.n_systems, 3):
+            pbc_tensor = pbc
+        else:
+            raise ValueError(
+                f"Expected pbc shape [3] or [{self.n_systems}, 3], "
+                f"got {tuple(pbc.shape)}"
+            )
 
         data: dict[str, torch.Tensor] = {
             AtomicDataDict.POSITIONS_KEY: sim_state.positions,
             AtomicDataDict.CELL_KEY: sim_state.row_vector_cell,
             AtomicDataDict.PBC_KEY: pbc_tensor,
-            AtomicDataDict.BATCH_KEY: sim_state.system_idx,
-            AtomicDataDict.NUM_NODES_KEY: sim_state.system_idx.bincount(),
-            AtomicDataDict.ATOMIC_NUMBERS_KEY: sim_state.atomic_numbers,
+            AtomicDataDict.BATCH_KEY: system_idx,
+            AtomicDataDict.NUM_NODES_KEY: system_idx.bincount(),
+            AtomicDataDict.ATOMIC_NUMBERS_KEY: atomic_numbers,
         }
 
         # === apply transforms ===

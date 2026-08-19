@@ -129,3 +129,38 @@ class _IntegrationLoaderMixin:
             ),
             **kwargs,
         )
+
+    @classmethod
+    def from_saved_model(
+        cls,
+        model_path: Union[str, Path],
+        device: Union[str, torch.device] = "cpu",
+        chemical_species_to_atom_type_map: Optional[Union[Dict[str, str], bool]] = None,
+        allow_tf32: bool = False,
+        model_name: str = _SOLE_MODEL_KEY,
+        compile_mode: str = _EAGER_MODEL_KEY,
+        neighborlist_backend: str = DEFAULT_NEIGHBORLIST_BACKEND,
+        **kwargs,
+    ):
+        """Build an integration calculator from a saved NequIP package.
+
+        This is the public counterpart of the legacy ``_from_saved_model``
+        loader.  It is useful when an integration needs regular eager model
+        semantics rather than an AOTInductor artifact.  In particular, an MD
+        engine can keep state on CUDA while loading the same ``.nequip.zip``
+        package as the ASE correctness baseline.
+
+        ``compile_mode`` is explicit so callers cannot accidentally inherit a
+        process-wide compilation policy.  Pass ``"eager"`` for an uncompiled
+        model.
+        """
+        return cls._from_saved_model(
+            model_path=model_path,
+            device=device,
+            chemical_species_to_atom_type_map=chemical_species_to_atom_type_map,
+            allow_tf32=allow_tf32,
+            model_name=model_name,
+            compile_mode=compile_mode,
+            neighborlist_backend=neighborlist_backend,
+            **kwargs,
+        )

@@ -257,10 +257,12 @@ def alchemiops_batch_cell_list(
     is_non_periodic = ~pbc.any(dim=1)  # [n_systems]
     is_zero_cell = cell.abs().sum(dim=(1, 2)) == 0  # [n_systems]
     needs_nominal_cell = is_non_periodic & is_zero_cell
-    if needs_nominal_cell.any():
-        identity = torch.eye(3, dtype=cell.dtype, device=cell.device)
-        cell = cell.clone()  # Avoid modifying the original
-        cell[needs_nominal_cell] = identity
+    # Keep the CUDA neighbor-list path free of a device-to-host predicate.
+    # ``if needs_nominal_cell.any()`` implicitly synchronized every MD step,
+    # even for ordinary periodic cells.  The branch-free selection has the
+    # same values and remains entirely on the input device.
+    identity = torch.eye(3, dtype=cell.dtype, device=cell.device).expand_as(cell)
+    cell = torch.where(needs_nominal_cell[:, None, None], identity, cell)
 
     # call alchemiops cell list
     # nvalchemiops uses `positions.device` to select where neighborlist construction runs
