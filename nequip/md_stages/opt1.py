@@ -71,6 +71,7 @@ class EagerNequIPTorchSimEvaluator:
         model_path: str,
         *,
         device: torch.device,
+        require_stress: bool,
     ) -> None:
         try:
             import torch_sim as ts
@@ -116,10 +117,11 @@ class EagerNequIPTorchSimEvaluator:
 
         _assert_plain_eager_model(calculator.model)
         calculator.compute_forces = True
-        calculator.compute_stress = True
+        calculator.compute_stress = require_stress
         self.calculator = calculator
         self.device = device
         self.num_atoms = len(atoms)
+        self.require_stress = require_stress
 
         # TorchSim creates the immutable cell/PBC/system-index tensors once.
         # Atomic numbers live in the calculator so its forward path can reuse
@@ -128,6 +130,9 @@ class EagerNequIPTorchSimEvaluator:
             [atoms], device=device, dtype=torch.float64
         )
         self.sim_state.atomic_numbers = None
+        calculator.set_static_geometry(
+            self.sim_state.row_vector_cell, self.sim_state.pbc
+        )
 
         model_dtype = getattr(calculator.model, "model_dtype", None)
         self.model_dtype = (
@@ -160,7 +165,7 @@ class EagerNequIPTorchSimEvaluator:
         missing = [name for name in ("energy", "forces") if name not in outputs]
         if missing:
             raise RuntimeError(f"NequIP eager model omitted outputs {missing}")
-        stress = outputs.get("stress")
+        stress = outputs.get("stress") if self.require_stress else None
         if stress is not None:
             stress = stress.reshape(-1, 3, 3)[0].detach().to(torch.float64)
         return ModelOutput(
@@ -526,7 +531,10 @@ def run_md(request: MDRunRequest) -> MDRunResult:
         np.asarray(atoms.get_masses()), dtype=torch.float64, device=device
     ).clone()
     evaluator = EagerNequIPTorchSimEvaluator(
-        atoms, str(model_path), device=device
+        atoms,
+        str(model_path),
+        device=device,
+        require_stress=config.collect_trajectory,
     )
 
     # Warmup owns disposable state and thermostat variables.  Production is
@@ -616,6 +624,12 @@ def run_md(request: MDRunRequest) -> MDRunResult:
                 config.record_interval if config.collect_trajectory else None
             ),
             "trajectory_includes_step_zero": config.collect_trajectory,
+            "stress_requested": config.collect_trajectory,
+            # The released eager model's ForceStressOutput still differentiates
+            # the energy with respect to strain while computing forces.  Opt1
+            # safely avoids requesting/collecting stress, but deliberately does
+            # not rewrite the scientific model graph into a force-only variant.
+            "model_force_stress_graph_rewritten": False,
             **OPT1_POLICY,
         },
     )

@@ -229,10 +229,21 @@ def test_torchsim_persistent_topology_does_not_mutate_state() -> None:
     from nequip.data import AtomicDataDict
     from nequip.integrations.torchsim import NequIPTorchSimCalc
 
+    input_ids = []
+
     class FakeModel(torch.nn.Module):
         def forward(self, data):
             assert data[AtomicDataDict.ATOMIC_NUMBERS_KEY] is not None
             assert data[AtomicDataDict.BATCH_KEY] is not None
+            static_keys = (
+                AtomicDataDict.CELL_KEY,
+                AtomicDataDict.PBC_KEY,
+                AtomicDataDict.BATCH_KEY,
+                AtomicDataDict.NUM_NODES_KEY,
+                AtomicDataDict.ATOMIC_NUMBERS_KEY,
+            )
+            assert all(data[key].is_contiguous() for key in static_keys)
+            input_ids.append(tuple(id(data[key]) for key in static_keys))
             n_atoms = data[AtomicDataDict.POSITIONS_KEY].shape[0]
             return {
                 AtomicDataDict.TOTAL_ENERGY_KEY: torch.zeros(1),
@@ -256,7 +267,174 @@ def test_torchsim_persistent_topology_does_not_mutate_state() -> None:
     state = ts.io.atoms_to_state([atoms], "cpu", dtype=torch.float32)
     original_system_idx = state.system_idx
     state.atomic_numbers = None
+    calc.compute_stress = False
+    calc.set_static_geometry(state.row_vector_cell, state.pbc)
     output = calc(state)
+    output_again = calc(state)
     assert output["forces"].shape == (2, 3)
+    assert output_again["forces"].shape == (2, 3)
+    assert "stress" not in output
+    assert input_ids[0] == input_ids[1]
     assert state.atomic_numbers is None
     assert state.system_idx is original_system_idx
+
+
+def test_torchsim_static_topology_avoids_hot_path_equal(monkeypatch) -> None:
+    ts = pytest.importorskip("torch_sim")
+    from nequip.data import AtomicDataDict
+    from nequip.integrations.torchsim import NequIPTorchSimCalc
+
+    class FakeModel(torch.nn.Module):
+        def forward(self, data):
+            n_atoms = data[AtomicDataDict.POSITIONS_KEY].shape[0]
+            return {
+                AtomicDataDict.TOTAL_ENERGY_KEY: torch.zeros(1),
+                AtomicDataDict.FORCE_KEY: torch.zeros(n_atoms, 3),
+                AtomicDataDict.STRESS_KEY: torch.zeros(1, 3, 3),
+            }
+
+    atoms = Atoms(
+        "H2",
+        positions=[[0, 0, 0], [0, 0, 0.7]],
+        cell=[5, 5, 5],
+        pbc=True,
+    )
+    state = ts.io.atoms_to_state([atoms], "cpu", dtype=torch.float32)
+    calc = NequIPTorchSimCalc(
+        FakeModel(),
+        atomic_numbers=torch.tensor([1, 1], dtype=torch.long),
+        system_idx=torch.zeros(2, dtype=torch.long),
+    )
+    state.atomic_numbers = None
+    calc.set_static_geometry(state.row_vector_cell, state.pbc)
+
+    def fail_equal(*args, **kwargs):
+        raise AssertionError("static-topology hot path called torch.equal")
+
+    monkeypatch.setattr(torch, "equal", fail_equal)
+    assert calc(state)["forces"].shape == (2, 3)
+
+
+def test_torchsim_constructor_caches_multisystem_counts() -> None:
+    pytest.importorskip("torch_sim")
+    from nequip.data import AtomicDataDict
+    from nequip.integrations.torchsim import NequIPTorchSimCalc
+
+    class FakeModel(torch.nn.Module):
+        def forward(self, data):
+            n_atoms = data[AtomicDataDict.POSITIONS_KEY].shape[0]
+            return {
+                AtomicDataDict.TOTAL_ENERGY_KEY: torch.zeros(2),
+                AtomicDataDict.FORCE_KEY: torch.zeros(n_atoms, 3),
+                AtomicDataDict.STRESS_KEY: torch.zeros(2, 3, 3),
+            }
+
+    calc = NequIPTorchSimCalc(
+        FakeModel(),
+        atomic_numbers=torch.tensor([1, 1, 8], dtype=torch.long),
+        system_idx=torch.tensor([0, 0, 1], dtype=torch.long),
+    )
+
+    assert calc.n_systems == 2
+    assert calc.total_atoms == 3
+    torch.testing.assert_close(calc.num_nodes, torch.tensor([2, 1]))
+
+
+def test_torchsim_caches_static_atom_type_mapping() -> None:
+    ts = pytest.importorskip("torch_sim")
+    from nequip.data import AtomicDataDict
+    from nequip.data.transforms import ChemicalSpeciesToAtomTypeMapper
+    from nequip.integrations.torchsim import NequIPTorchSimCalc
+
+    atom_type_ids = []
+
+    class FakeModel(torch.nn.Module):
+        def forward(self, data):
+            atom_type_ids.append(id(data[AtomicDataDict.ATOM_TYPE_KEY]))
+            n_atoms = data[AtomicDataDict.POSITIONS_KEY].shape[0]
+            return {
+                AtomicDataDict.TOTAL_ENERGY_KEY: torch.zeros(1),
+                AtomicDataDict.FORCE_KEY: torch.zeros(n_atoms, 3),
+                AtomicDataDict.STRESS_KEY: torch.zeros(1, 3, 3),
+            }
+
+    mapper = ChemicalSpeciesToAtomTypeMapper(
+        model_type_names=["H"],
+        chemical_species_to_atom_type_map={"H": "H"},
+    )
+    calc = NequIPTorchSimCalc(
+        FakeModel(),
+        transforms=[mapper],
+        atomic_numbers=torch.tensor([1, 1], dtype=torch.long),
+        system_idx=torch.zeros(2, dtype=torch.long),
+    )
+    atoms = Atoms(
+        "H2",
+        positions=[[0, 0, 0], [0, 0, 0.7]],
+        cell=[5, 5, 5],
+        pbc=True,
+    )
+    state = ts.io.atoms_to_state([atoms], "cpu", dtype=torch.float32)
+    state.atomic_numbers = None
+    calc(state)
+    calc(state)
+
+    assert atom_type_ids[0] == atom_type_ids[1]
+    assert mapper not in calc.transforms
+
+
+def test_eager_torchsim_does_not_blanket_materialize_transform_outputs() -> None:
+    ts = pytest.importorskip("torch_sim")
+    from nequip.data import AtomicDataDict
+    from nequip.integrations.torchsim import NequIPTorchSimCalc
+
+    class NonContiguousTransform(torch.nn.Module):
+        def forward(self, data):
+            data["test_noncontiguous"] = torch.zeros(2, 3).mT
+            return data
+
+    seen_contiguous = []
+
+    class FakeModel(torch.nn.Module):
+        def forward(self, data):
+            seen_contiguous.append(data["test_noncontiguous"].is_contiguous())
+            n_atoms = data[AtomicDataDict.POSITIONS_KEY].shape[0]
+            return {
+                AtomicDataDict.TOTAL_ENERGY_KEY: torch.zeros(1),
+                AtomicDataDict.FORCE_KEY: torch.zeros(n_atoms, 3),
+                AtomicDataDict.STRESS_KEY: torch.zeros(1, 3, 3),
+            }
+
+    atoms = Atoms(
+        "H2",
+        positions=[[0, 0, 0], [0, 0, 0.7]],
+        cell=[5, 5, 5],
+        pbc=True,
+    )
+    state = ts.io.atoms_to_state([atoms], "cpu", dtype=torch.float32)
+    state.atomic_numbers = None
+    common = {
+        "transforms": [NonContiguousTransform()],
+        "atomic_numbers": torch.tensor([1, 1], dtype=torch.long),
+        "system_idx": torch.zeros(2, dtype=torch.long),
+    }
+    eager_calc = NequIPTorchSimCalc(FakeModel(), **common)
+    eager_calc(state)
+    compiled_stride_calc = NequIPTorchSimCalc(
+        FakeModel(), model_requires_contiguous_inputs=True, **common
+    )
+    compiled_stride_calc(state)
+
+    assert seen_contiguous == [False, True]
+
+
+def test_torchsim_forward_source_has_no_direct_host_transfer() -> None:
+    pytest.importorskip("torch_sim")
+    from nequip.integrations.torchsim import NequIPTorchSimCalc
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(NequIPTorchSimCalc.forward)))
+    attributes = {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+    }
+    assert not attributes & {"cpu", "numpy", "item"}
+    assert "bincount" not in attributes
