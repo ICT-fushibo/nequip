@@ -1,5 +1,7 @@
 """Wrapper for NequIP framework models in torch-sim"""
 
+import contextlib
+
 import torch
 
 import torch_sim as ts
@@ -287,8 +289,11 @@ class NequIPTorchSimCalc(_IntegrationLoaderMixin, ModelInterface):
             data[AtomicDataDict.ATOM_TYPE_KEY] = self.atom_types
 
         # === apply transforms ===
-        for t in self.transforms:
-            data = t(data)
+        profiler = getattr(self, "_md_opt_profiler", None)
+        phase = contextlib.nullcontext if profiler is None else profiler.phase
+        with phase("neighbor_and_transforms"):
+            for t in self.transforms:
+                data = t(data)
 
         # AOTI reads inputs using compile-time strides.  Preserve the old
         # defensive behavior for compiled calculators, but do not blanket-
@@ -300,7 +305,8 @@ class NequIPTorchSimCalc(_IntegrationLoaderMixin, ModelInterface):
             }
 
         # === run model ===
-        out = self.model(data)
+        with phase("model_energy_force_stress"):
+            out = self.model(data)
 
         # === collect outputs ===
         results: dict[str, torch.Tensor] = {}

@@ -31,6 +31,10 @@ from md_benchmark.md_route import (
     MDRunResult,
     validate_result,
 )
+from md_benchmark.performance import (
+    CudaPhaseProfiler,
+    performance_profile_requested,
+)
 
 
 OPT1_POLICY = {
@@ -72,6 +76,7 @@ class EagerNequIPTorchSimEvaluator:
         *,
         device: torch.device,
         require_stress: bool,
+        profiler: CudaPhaseProfiler,
     ) -> None:
         try:
             import torch_sim as ts
@@ -119,6 +124,8 @@ class EagerNequIPTorchSimEvaluator:
         calculator.compute_forces = True
         calculator.compute_stress = require_stress
         self.calculator = calculator
+        self.calculator._md_opt_profiler = profiler
+        self.profiler = profiler
         self.device = device
         self.num_atoms = len(atoms)
         self.require_stress = require_stress
@@ -161,7 +168,8 @@ class EagerNequIPTorchSimEvaluator:
 
         # Rebind a CUDA tensor; no copy or host conversion occurs here.
         self.sim_state.positions = positions
-        outputs = self.calculator(self.sim_state)
+        with self.profiler.phase("calculator_force"):
+            outputs = self.calculator(self.sim_state)
         missing = [name for name in ("energy", "forces") if name not in outputs]
         if missing:
             raise RuntimeError(f"NequIP eager model omitted outputs {missing}")
@@ -530,11 +538,16 @@ def run_md(request: MDRunRequest) -> MDRunResult:
     masses = torch.as_tensor(
         np.asarray(atoms.get_masses()), dtype=torch.float64, device=device
     ).clone()
+    profiler = CudaPhaseProfiler(
+        enabled=performance_profile_requested(request.options),
+        device=device,
+    )
     evaluator = EagerNequIPTorchSimEvaluator(
         atoms,
         str(model_path),
         device=device,
         require_stress=config.collect_trajectory,
+        profiler=profiler,
     )
 
     # Warmup owns disposable state and thermostat variables.  Production is
@@ -566,19 +579,23 @@ def run_md(request: MDRunRequest) -> MDRunResult:
 
     torch.cuda.reset_peak_memory_stats(device)
     torch.cuda.synchronize(device)
+    profiler.start()
     started = time.perf_counter()
     _ensure_evaluated(state, evaluator)
     # ASE Dynamics observers include the initial frame at nsteps=0.
     if config.collect_trajectory:
         record_frame(0)
     for step in range(1, config.steps + 1):
-        integrator.step(state, evaluator)
+        with profiler.phase("md_step"):
+            integrator.step(state, evaluator)
         if config.collect_statistics and step in observation_steps:
             observations.append(_observation(state, step=step, masses=masses))
         if config.collect_trajectory and step % config.record_interval == 0:
             record_frame(step)
     torch.cuda.synchronize(device)
+    profiler.stop()
     elapsed = time.perf_counter() - started
+    performance_profile = profiler.summary(synchronize=False)
     peak_memory_gb = torch.cuda.max_memory_allocated(device) / 1.0e9
     _validate_finite(state)
 
@@ -630,6 +647,7 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             # safely avoids requesting/collecting stress, but deliberately does
             # not rewrite the scientific model graph into a force-only variant.
             "model_force_stress_graph_rewritten": False,
+            "performance_profile": performance_profile,
             **OPT1_POLICY,
         },
     )
