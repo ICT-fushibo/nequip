@@ -76,7 +76,7 @@ class EagerNequIPTorchSimEvaluator:
         *,
         device: torch.device,
         require_stress: bool,
-        profiler: CudaPhaseProfiler,
+        profiler: CudaPhaseProfiler | None = None,
     ) -> None:
         try:
             import torch_sim as ts
@@ -125,7 +125,10 @@ class EagerNequIPTorchSimEvaluator:
         calculator.compute_stress = require_stress
         self.calculator = calculator
         self.calculator._md_opt_profiler = profiler
-        self.profiler = profiler
+        self.profiler = profiler or CudaPhaseProfiler(
+            enabled=False,
+            device=device,
+        )
         self.device = device
         self.num_atoms = len(atoms)
         self.require_stress = require_stress
