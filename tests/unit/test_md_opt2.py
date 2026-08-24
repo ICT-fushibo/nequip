@@ -109,6 +109,24 @@ def test_force_only_wrapper_accepts_torch_package_class_identity() -> None:
     assert isinstance(wrapper.energy_model, _QuadraticEnergy)
 
 
+def test_force_only_wrapper_accepts_packaged_non_bool_derivative_flag() -> None:
+    def init(self):
+        torch.nn.Module.__init__(self)
+        self.func = _QuadraticEnergy()
+        self.do_derivatives = 1
+
+    packaged_type = type(
+        "ForceStressOutput",
+        (torch.nn.Module,),
+        {
+            "__module__": "torch_package_0.nequip.nn.grad_output",
+            "__init__": init,
+        },
+    )
+    wrapper = ForceOnlyEnergyVJP.from_released_graph_model(packaged_type())
+    assert isinstance(wrapper.energy_model, _QuadraticEnergy)
+
+
 def test_fixed_capacity_inputs_keep_addresses_and_pad_far_edges() -> None:
     exact = _exact_inputs(edge_count=2)
     fixed = FixedCapacityModelInputs.from_exact(

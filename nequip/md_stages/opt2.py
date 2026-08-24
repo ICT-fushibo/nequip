@@ -111,11 +111,10 @@ class ForceOnlyEnergyVJP(torch.nn.Module):
         # paths, so validate the class name and required structure instead of
         # pinning a private module path.
         outer_type = type(outer)
+        energy_model = getattr(outer, "func", None)
         is_force_stress_output = (
-            isinstance(outer, torch.nn.Module)
-            and outer_type.__name__ == "ForceStressOutput"
-            and isinstance(getattr(outer, "func", None), torch.nn.Module)
-            and isinstance(getattr(outer, "do_derivatives", None), bool)
+            outer_type.__name__ == "ForceStressOutput"
+            and isinstance(energy_model, torch.nn.Module)
         )
         if not is_force_stress_output:
             raise RuntimeError(
@@ -123,11 +122,16 @@ class ForceOnlyEnergyVJP(torch.nn.Module):
                 "outer ForceStressOutput; refusing unsafe model surgery. "
                 f"Inspected wrapper chain: {inspected_types}"
             )
-        if not outer.do_derivatives:
+        # Older torch.package archives may not preserve the annotated bool as
+        # a plain Python ``bool``.  An explicit False is unsafe; absence or a
+        # truthy packaged scalar is accepted because ForceStressOutput's
+        # structural contract and the subsequent eager parity checks remain
+        # authoritative.
+        if getattr(outer, "do_derivatives", True) is False:
             raise RuntimeError(
                 "NequIP Opt2 requires a derivative-enabled released model"
             )
-        return cls(outer.func)
+        return cls(energy_model)
 
     def forward(
         self, inputs: dict[str, Tensor]
