@@ -354,7 +354,15 @@ class ModelOnlyCUDAGraphEvaluator:
                     "released NequIP ForceStressOutput omitted energy or forces"
                 )
             reference_energy, reference_forces = self.wrapper(exact_inputs)
-            padded_energy, padded_forces = self.wrapper(self.fixed.tensors)
+            # Do not touch the persistent capture leaf on the default stream.
+            # Its AccumulateGrad node must first be created on the warmup and
+            # capture stream or CUDA rejects the backward graph dependency.
+            padded_inputs = {
+                key: value.detach().clone().contiguous()
+                for key, value in self.fixed.tensors.items()
+            }
+            padded_inputs[AtomicDataDict.POSITIONS_KEY].requires_grad_(True)
+            padded_energy, padded_forces = self.wrapper(padded_inputs)
         official_energy = official_energy.detach().reshape(-1).clone()
         official_forces = official_forces.detach().clone()
         reference_energy = reference_energy.detach().clone()
@@ -401,19 +409,25 @@ class ModelOnlyCUDAGraphEvaluator:
             rtol=force_rtol,
             atol=force_atol,
         )
+        del official_out, padded_inputs, padded_energy, padded_forces
 
         warmup_stream = torch.cuda.Stream(device=device)
-        warmup_stream.wait_stream(torch.cuda.current_stream(device))
+        current_stream = torch.cuda.current_stream(device)
+        warmup_stream.wait_stream(current_stream)
         try:
             with torch.cuda.stream(warmup_stream), torch.enable_grad():
                 for _ in range(3):
                     self.wrapper(self.fixed.tensors)
             warmup_stream.synchronize()
             self.graph = torch.cuda.CUDAGraph()
-            with torch.enable_grad(), torch.cuda.graph(self.graph):
+            with torch.enable_grad(), torch.cuda.graph(
+                self.graph, stream=warmup_stream
+            ):
                 self.graph_energy, self.graph_forces = self.wrapper(
                     self.fixed.tensors
                 )
+            current_stream.wait_stream(warmup_stream)
+            torch.cuda.synchronize(device)
         except Exception as exc:
             raise RuntimeError(
                 "NequIP Opt2 model-only CUDA Graph capture failed; "
