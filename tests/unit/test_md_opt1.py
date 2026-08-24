@@ -428,11 +428,13 @@ def test_eager_torchsim_does_not_blanket_materialize_transform_outputs() -> None
     assert seen_contiguous == [False, True]
 
 
-def test_torchsim_forward_source_has_no_direct_host_transfer() -> None:
+def test_torchsim_input_preparation_has_no_direct_host_transfer() -> None:
     pytest.importorskip("torch_sim")
     from nequip.integrations.torchsim import NequIPTorchSimCalc
 
-    tree = ast.parse(textwrap.dedent(inspect.getsource(NequIPTorchSimCalc.forward)))
+    tree = ast.parse(
+        textwrap.dedent(inspect.getsource(NequIPTorchSimCalc.prepare_model_inputs))
+    )
     attributes = {
         node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
     }

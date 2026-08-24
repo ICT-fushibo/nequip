@@ -205,15 +205,21 @@ class NequIPTorchSimCalc(_IntegrationLoaderMixin, ModelInterface):
             f"got {tuple(pbc.shape)}"
         )
 
-    def forward(self, state: ts.SimState) -> dict[str, torch.Tensor]:  # noqa: C901
-        """Compute energies, forces, and stresses.
+    def prepare_model_inputs(
+        self, state: ts.SimState
+    ) -> dict[str, torch.Tensor]:  # noqa: C901
+        """Build transformed model inputs without running the model.
+
+        Neighbor-list construction intentionally lives in this method so a
+        model-only CUDA Graph caller can execute it outside the captured graph
+        while sharing eager TorchSim's exact transforms.
 
         Args:
             state (:class:`~torch_sim.SimState`): state object containing positions, cell,
                 and system information.
 
         Returns:
-            dict[str, :class:`torch.Tensor`]: computed properties (``"energy"``, ``"forces"``, ``"stress"``).
+            dict[str, :class:`torch.Tensor`]: transformed NequIP model inputs.
         """
         sim_state = state
 
@@ -303,6 +309,15 @@ class NequIPTorchSimCalc(_IntegrationLoaderMixin, ModelInterface):
                 k: (v.contiguous() if torch.is_tensor(v) else v)
                 for k, v in data.items()
             }
+
+        return data
+
+    def forward(self, state: ts.SimState) -> dict[str, torch.Tensor]:
+        """Compute energies, forces, and stresses."""
+
+        data = self.prepare_model_inputs(state)
+        profiler = getattr(self, "_md_opt_profiler", None)
+        phase = contextlib.nullcontext if profiler is None else profiler.phase
 
         # === run model ===
         with phase("model_energy_force_stress"):
