@@ -585,6 +585,8 @@ def run_md(request: MDRunRequest) -> MDRunResult:
     profiler.start()
     started = time.perf_counter()
     _ensure_evaluated(state, evaluator)
+    if config.collect_statistics and 0 in observation_steps:
+        observations.append(_observation(state, step=0, masses=masses))
     # ASE Dynamics observers include the initial frame at nsteps=0.
     if config.collect_trajectory:
         record_frame(0)
