@@ -124,13 +124,7 @@ def _neighbors_per_atom(
     num_atoms: int,
     options: dict[str, Any],
 ) -> tuple[int, int | None]:
-    """Map the existing total-edge probe option onto one CAP slot count."""
-
-    explicit = options.get("neighbors_per_atom")
-    if explicit is not None:
-        if isinstance(explicit, bool) or not isinstance(explicit, int) or explicit < 1:
-            raise ValueError("route option neighbors_per_atom must be positive")
-        return explicit, None
+    """Resolve one eSEN-style CAP without applying probe headroom twice."""
 
     edge_count = int(exact_edge_index.shape[1])
     if edge_count < 1:
@@ -140,7 +134,15 @@ def _neighbors_per_atom(
     slot_step = int(options.get("neighbor_capacity_slot_step", 8))
     if slot_step < 1:
         raise ValueError("neighbor capacity slot step must be positive")
+    factor = float(options.get("edge_capacity_factor", 1.10))
+    initial_safe = _round_neighbor_capacity(
+        maximum,
+        factor=factor,
+        slot_step=slot_step,
+    )
+
     requested_total = options.get("edge_capacity")
+    total_floor = 0
     if requested_total is not None:
         if (
             isinstance(requested_total, bool)
@@ -151,20 +153,24 @@ def _neighbors_per_atom(
                 "route option edge_capacity must be an integer no smaller than "
                 "the initial real edge count"
             )
-        # Convert the existing Opt2 total-edge probe into a uniform per-centre
-        # CAP, round it to one eSEN slot bucket, then add one full guard bucket.
-        # Retain the initial maximum coordination as a second lower bound.
+        # The trajectory probe has already applied its total-edge headroom.
+        # Convert and align exactly once; an extra slot bucket here would apply
+        # a second guard (for example 88 -> 96 on the bulk-Cu investigation).
         per_centre = math.ceil(requested_total / num_atoms)
-        converted = math.ceil(per_centre / slot_step) * slot_step + slot_step
-        initial_safe = math.ceil(maximum / slot_step) * slot_step + slot_step
-        return max(converted, initial_safe), requested_total
-    else:
-        factor = float(options.get("edge_capacity_factor", 1.10))
-    return (
-        _round_neighbor_capacity(maximum, factor=factor, slot_step=slot_step)
-        + slot_step,
-        requested_total,
-    )
+        total_floor = math.ceil(per_centre / slot_step) * slot_step
+
+    explicit = options.get("neighbors_per_atom")
+    if explicit is not None:
+        if isinstance(explicit, bool) or not isinstance(explicit, int) or explicit < 1:
+            raise ValueError("route option neighbors_per_atom must be positive")
+        if explicit < maximum:
+            raise ValueError(
+                "route option neighbors_per_atom is smaller than the initial "
+                f"receiver degree: {explicit} < {maximum}"
+            )
+        return explicit, requested_total
+
+    return max(total_floor, initial_safe), requested_total
 
 
 class FixedShapeAlchemiNeighborBuilder:
@@ -519,6 +525,18 @@ class WholeStepCUDAGraphMD:
             exact_edge_index, num_atoms=self.num_atoms, options=options
         )
         self.requested_total_edge_capacity = requested_total
+        if options.get("neighbors_per_atom") is not None:
+            self.capacity_source = (
+                "trajectory-total-and-per-atom-probe"
+                if requested_total is not None
+                else "explicit-per-atom"
+            )
+        else:
+            self.capacity_source = (
+                "total-edge-plus-initial-per-atom"
+                if requested_total is not None
+                else "initial-per-atom-auto"
+            )
         edge_capacity = self.num_atoms * neighbors_per_atom
         self.static_inputs: dict[str, Tensor] = {}
         for key, value in exact_inputs.items():
@@ -1209,6 +1227,8 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             "fixed_edge_capacity": engine.builder.edge_capacity,
             "neighbors_per_atom": engine.builder.neighbors_per_atom,
             "initial_maximum_neighbors": engine.initial_maximum_neighbors,
+            "edge_capacity_source": engine.capacity_source,
+            "capacity_total_to_per_atom_guard_slots": 0,
             "edge_capacity_policy": "esen_cap_uniform_per_centre",
             "edge_overflow_policy": "device_detect_raise_at_sync_no_fallback",
             "edge_padding": "distributed_far_periodic_self_edge_zero_cutoff",

@@ -238,6 +238,22 @@ class FixedCapacityModelInputs:
         return {key: value.data_ptr() for key, value in self.tensors.items()}
 
 
+def _maximum_neighbors_per_atom(
+    edge_index: Tensor,
+    *,
+    num_atoms: int,
+) -> int:
+    """Return the largest NequIP receiver degree during a capacity probe."""
+    if num_atoms < 1:
+        raise ValueError("num_atoms must be positive")
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError("edge_index must have shape [2, num_edges]")
+    if edge_index.shape[1] == 0:
+        return 0
+    counts = torch.bincount(edge_index[1], minlength=num_atoms)[:num_atoms]
+    return int(counts.max().item())
+
+
 class ModelOnlyCUDAGraphEvaluator:
     """AlchemiOps neighbor list outside, eager NequIP E/F inside CUDA Graph."""
 
@@ -319,6 +335,17 @@ class ModelOnlyCUDAGraphEvaluator:
                 "captured energy model from fixed-capacity edge indices"
             )
         exact_inputs = self._filter_model_inputs(initial, clone_position=True)
+        self.track_neighbor_capacity = bool(
+            options.get("capacity_probe_collect_per_atom", False)
+        )
+        self.initial_max_neighbors: int | None = None
+        self.peak_neighbors_per_atom: int | None = None
+        if self.track_neighbor_capacity:
+            self.initial_max_neighbors = _maximum_neighbors_per_atom(
+                exact_inputs[AtomicDataDict.EDGE_INDEX_KEY],
+                num_atoms=self.num_atoms,
+            )
+            self.peak_neighbors_per_atom = self.initial_max_neighbors
 
         initial_edges = exact_inputs[AtomicDataDict.EDGE_INDEX_KEY].shape[1]
         edge_capacity = _edge_capacity(initial_edges, options)
@@ -601,6 +628,16 @@ class ModelOnlyCUDAGraphEvaluator:
     def __call__(self, positions: Tensor) -> ModelOutput:
         prepared = self._prepare_exact(positions)
         exact = self._filter_model_inputs(prepared, clone_position=False)
+        if self.track_neighbor_capacity:
+            maximum = _maximum_neighbors_per_atom(
+                exact[AtomicDataDict.EDGE_INDEX_KEY],
+                num_atoms=self.num_atoms,
+            )
+            assert self.peak_neighbors_per_atom is not None
+            self.peak_neighbors_per_atom = max(
+                self.peak_neighbors_per_atom,
+                maximum,
+            )
         with self.profiler.phase("fixed_input_update"):
             self.fixed.update(exact)
         if self.fixed.data_ptrs() != self._captured_ptrs:
@@ -628,6 +665,7 @@ class ModelOnlyCUDAGraphEvaluator:
         """Exclude disposable MD warmup calls from production accounting."""
 
         self.production_replays = 0
+        self.peak_neighbors_per_atom = self.initial_max_neighbors
 
 
 def _edge_capacity(initial_edges: int, options: dict[str, Any]) -> int:
@@ -870,6 +908,10 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             "fixed_edge_capacity": evaluator.fixed.edge_capacity,
             "initial_edge_count": evaluator.fixed.initial_edge_count,
             "peak_edge_count": evaluator.fixed.peak_edge_count,
+            "peak_neighbors_per_atom": evaluator.peak_neighbors_per_atom,
+            "capacity_probe_collect_per_atom": (
+                evaluator.track_neighbor_capacity
+            ),
             "edge_overflow_policy": "raise_no_fallback",
             "edge_padding": "far_periodic_self_edge_zero_cutoff",
             "edge_padding_cell_shift": (

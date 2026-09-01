@@ -96,12 +96,28 @@ def test_total_probe_capacity_maps_to_per_centre_cap() -> None:
         num_atoms=3,
         options={"edge_capacity": 9, "neighbor_capacity_slot_step": 1},
     )
-    assert capacity == 4
+    assert capacity == 3
     assert requested == 9
     explicit, requested = _neighbors_per_atom(
         edge_index, num_atoms=3, options={"neighbors_per_atom": 7}
     )
     assert explicit == 7
+    assert requested is None
+
+
+def test_initial_capacity_applies_only_one_guard_bucket() -> None:
+    edge_index = torch.stack(
+        [
+            torch.arange(80, dtype=torch.long) % 2,
+            torch.zeros(80, dtype=torch.long),
+        ]
+    )
+    capacity, requested = _neighbors_per_atom(
+        edge_index,
+        num_atoms=2,
+        options={"edge_capacity_factor": 1.10, "neighbor_capacity_slot_step": 8},
+    )
+    assert capacity == 88
     assert requested is None
 
 
@@ -216,6 +232,9 @@ def test_capture_is_followed_by_full_one_step_validation() -> None:
     validation = textwrap.dedent(
         inspect.getsource(WholeStepCUDAGraphMD.validate_one_step)
     )
+    snapshot = textwrap.dedent(
+        inspect.getsource(WholeStepCUDAGraphMD._state_snapshot)
+    )
     assert validation.count("self._graph_body()") == 2
     assert validation.count("self.graph.replay()") == 2
     for field in (
@@ -226,7 +245,8 @@ def test_capture_is_followed_by_full_one_step_validation() -> None:
         "thermostat_eta",
         "thermostat_p_eta",
     ):
-        assert field in validation
+        assert field in snapshot
+    assert validation.count("self._state_snapshot()") == 2
     assert "torch.isfinite" in validation
     assert "warnings.warn" in validation
 

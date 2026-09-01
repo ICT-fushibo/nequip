@@ -17,6 +17,7 @@ from nequip.md_stages.opt2 import (
     FixedCapacityModelInputs,
     ForceOnlyEnergyVJP,
     ModelOnlyCUDAGraphEvaluator,
+    _maximum_neighbors_per_atom,
     _edge_capacity,
     _max_abs,
     _validate_request,
@@ -171,6 +172,13 @@ def test_edge_capacity_validation_and_rounding() -> None:
         _edge_capacity(100, {"edge_capacity_factor": 0.5})
 
 
+def test_probe_maximum_neighbors_uses_nequip_receiver_axis() -> None:
+    edge_index = torch.tensor(
+        [[1, 2, 0, 2, 0, 1], [0, 0, 1, 1, 2, 2]], dtype=torch.long
+    )
+    assert _maximum_neighbors_per_atom(edge_index, num_atoms=3) == 2
+
+
 def _request(tmp_path, **overrides):
     model_path = tmp_path / "model.nequip.zip"
     model_path.write_bytes(b"placeholder")
@@ -255,8 +263,11 @@ def test_evaluator_source_keeps_neighbor_build_outside_replay() -> None:
 def test_replay_counter_reset_and_max_abs() -> None:
     evaluator = object.__new__(ModelOnlyCUDAGraphEvaluator)
     evaluator.production_replays = 9
+    evaluator.initial_max_neighbors = 7
+    evaluator.peak_neighbors_per_atom = 9
     evaluator.reset_production_replays()
     assert evaluator.production_replays == 0
+    assert evaluator.peak_neighbors_per_atom == evaluator.initial_max_neighbors
     assert _max_abs(torch.tensor([1.0, 4.0]), torch.tensor([2.0, 1.0])) == 3.0
 
 
