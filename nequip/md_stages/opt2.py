@@ -340,8 +340,8 @@ class ModelOnlyCUDAGraphEvaluator:
         )
         self.initial_max_neighbors: int | None = None
         self.peak_neighbors_per_atom: int | None = None
-        self.initial_neighbors_by_atom: list[int] | None = None
-        self.max_neighbors_by_atom: list[int] | None = None
+        self.initial_neighbors_by_atom: Tensor | None = None
+        self.max_neighbors_by_atom: Tensor | None = None
         if self.track_neighbor_capacity:
             self.initial_max_neighbors = _maximum_neighbors_per_atom(
                 exact_inputs[AtomicDataDict.EDGE_INDEX_KEY],
@@ -352,8 +352,8 @@ class ModelOnlyCUDAGraphEvaluator:
                 exact_inputs[AtomicDataDict.EDGE_INDEX_KEY][1],
                 minlength=self.num_atoms,
             )[: self.num_atoms]
-            self.initial_neighbors_by_atom = counts.detach().cpu().tolist()
-            self.max_neighbors_by_atom = list(self.initial_neighbors_by_atom)
+            self.initial_neighbors_by_atom = counts.detach().clone()
+            self.max_neighbors_by_atom = counts.detach().clone()
 
         initial_edges = exact_inputs[AtomicDataDict.EDGE_INDEX_KEY].shape[1]
         edge_capacity = _edge_capacity(initial_edges, options)
@@ -649,11 +649,10 @@ class ModelOnlyCUDAGraphEvaluator:
             counts = torch.bincount(
                 exact[AtomicDataDict.EDGE_INDEX_KEY][1], minlength=self.num_atoms
             )[: self.num_atoms]
-            values = counts.detach().cpu().tolist()
-            self.max_neighbors_by_atom = [
-                max(old, new)
-                for old, new in zip(self.max_neighbors_by_atom or values, values)
-            ]
+            assert self.max_neighbors_by_atom is not None
+            self.max_neighbors_by_atom.copy_(
+                torch.maximum(self.max_neighbors_by_atom, counts)
+            )
         with self.profiler.phase("fixed_input_update"):
             self.fixed.update(exact)
         if self.fixed.data_ptrs() != self._captured_ptrs:
@@ -682,11 +681,13 @@ class ModelOnlyCUDAGraphEvaluator:
 
         self.production_replays = 0
         self.peak_neighbors_per_atom = self.initial_max_neighbors
-        self.max_neighbors_by_atom = (
-            None
-            if self.initial_neighbors_by_atom is None
-            else list(self.initial_neighbors_by_atom)
-        )
+        initial_by_atom = getattr(self, "initial_neighbors_by_atom", None)
+        if initial_by_atom is None:
+            self.max_neighbors_by_atom = None
+        elif getattr(self, "max_neighbors_by_atom", None) is None:
+            self.max_neighbors_by_atom = initial_by_atom.clone()
+        else:
+            self.max_neighbors_by_atom.copy_(initial_by_atom)
 
 
 def _edge_capacity(initial_edges: int, options: dict[str, Any]) -> int:
@@ -930,7 +931,13 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             "initial_edge_count": evaluator.fixed.initial_edge_count,
             "peak_edge_count": evaluator.fixed.peak_edge_count,
             "peak_neighbors_per_atom": evaluator.peak_neighbors_per_atom,
-            "maximum_neighbors_by_atom": evaluator.max_neighbors_by_atom,
+            "maximum_neighbors_by_atom": (
+                None
+                if evaluator.max_neighbors_by_atom is None
+                else evaluator.max_neighbors_by_atom.detach()
+                .to(device="cpu")
+                .tolist()
+            ),
             "capacity_probe_collect_per_atom": (
                 evaluator.track_neighbor_capacity
             ),
