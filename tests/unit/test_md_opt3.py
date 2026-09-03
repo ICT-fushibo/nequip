@@ -74,6 +74,38 @@ def test_fixed_builder_uses_distributed_far_self_edge_padding() -> None:
     builder.raise_for_overflow()
 
 
+def test_skin_builder_matches_full_search_with_per_atom_cap() -> None:
+    positions = torch.tensor(
+        [[0.1, 0.0, 0.0], [4.8, 0.0, 0.0]], dtype=torch.float64
+    )
+    options = dict(
+        num_atoms=2,
+        cell=torch.eye(3, dtype=torch.float64) * 5.0,
+        pbc=torch.ones(3, dtype=torch.bool),
+        cutoff=1.0,
+        neighbors_per_atom=2,
+        neighbor_capacities=[1, 2],
+    )
+
+    def make_builder(**extra):
+        return FixedShapeAlchemiNeighborBuilder(
+            **options,
+            output_edge_index=torch.empty(2, 3, dtype=torch.long),
+            output_edge_shift=torch.empty(3, 3, dtype=torch.float64),
+            **extra,
+        )
+
+    full = make_builder()
+    skin = make_builder(verlet_skin=0.5, verlet_candidate_capacity=4)
+    skin.initialize_skin(positions)
+
+    full_output = full.build(positions)
+    skin_output = skin.build(positions)
+    for actual, expected in zip(skin_output, full_output):
+        torch.testing.assert_close(actual, expected)
+    assert skin.edge_capacity == 3
+
+
 def test_fixed_builder_device_telemetry_rejects_per_centre_overflow() -> None:
     positions = torch.tensor(
         [[0.0, 0.0, 0.0], [0.7, 0.0, 0.0], [0.0, 0.7, 0.0]],

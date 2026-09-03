@@ -34,6 +34,13 @@ from md_benchmark.md_route import (
     MDRunResult,
     validate_result,
 )
+from md_benchmark.neighbor_utils import (
+    capacities_from_counts,
+    displacement_exceeds_skin,
+    make_slot_layout,
+    normalize_neighbor_capacities,
+    select_skin_candidates,
+)
 from md_benchmark.performance import (
     CudaPhaseProfiler,
     performance_profile_requested,
@@ -191,8 +198,11 @@ class FixedShapeAlchemiNeighborBuilder:
         pbc: Tensor,
         cutoff: float,
         neighbors_per_atom: int,
+        neighbor_capacities: list[int] | Tensor | None = None,
         output_edge_index: Tensor,
         output_edge_shift: Tensor,
+        verlet_skin: float = 0.0,
+        verlet_candidate_capacity: int | None = None,
     ) -> None:
         if num_atoms < 2:
             raise ValueError("fixed neighbor builder requires at least two atoms")
@@ -202,11 +212,35 @@ class FixedShapeAlchemiNeighborBuilder:
             raise ValueError("neighbors_per_atom must be positive")
         self.num_atoms = int(num_atoms)
         self.cutoff = float(cutoff)
-        self.neighbors_per_atom = int(neighbors_per_atom)
-        self.edge_capacity = self.num_atoms * self.neighbors_per_atom
+        capacities = normalize_neighbor_capacities(
+            neighbor_capacities,
+            num_atoms=num_atoms,
+            default=int(neighbors_per_atom),
+        )
+        (
+            self.slot_centres,
+            self.slot_ranks,
+            self.selection_indices,
+            self.neighbors_per_atom,
+            self.edge_capacity,
+        ) = make_slot_layout(capacities, device=cell.device)
+        self.neighbor_capacities = torch.as_tensor(
+            capacities, dtype=torch.long, device=cell.device
+        )
+        if verlet_skin < 0:
+            raise ValueError("verlet_skin must be non-negative")
+        self.verlet_skin = float(verlet_skin)
+        self.verlet_candidate_capacity = verlet_candidate_capacity
+        self.skin_candidate_ids: Tensor | None = None
+        self.skin_candidate_mask: Tensor | None = None
+        self.skin_reference_positions: Tensor | None = None
+        self.skin_misses = torch.zeros((), dtype=torch.long, device=cell.device)
+        self.skin_rebuilds = 0
         self.device = cell.device
         self.cell = cell.detach().reshape(3, 3).contiguous()
-        self.repetitions = _pbc_repetitions(cell, cutoff, pbc)
+        self.inverse_cell = torch.linalg.inv(self.cell).contiguous()
+        self.pbc = pbc.detach().to(device=cell.device, dtype=torch.bool).reshape(3)
+        self.repetitions = _pbc_repetitions(cell, cutoff + self.verlet_skin, pbc)
 
         axes = [
             torch.arange(
@@ -235,9 +269,7 @@ class FixedShapeAlchemiNeighborBuilder:
             dtype=torch.long,
             device=self.device,
         ).reshape(1, -1)
-        self.slot_centres = torch.arange(
-            self.num_atoms, dtype=torch.long, device=self.device
-        ).repeat_interleave(self.neighbors_per_atom)
+        self.slot_centres = self.slot_centres
 
         if output_edge_index.shape != (2, self.edge_capacity):
             raise ValueError("fixed edge-index output has the wrong shape")
@@ -276,6 +308,9 @@ class FixedShapeAlchemiNeighborBuilder:
         self.maximum_capacity_excess = torch.zeros(
             (), dtype=torch.long, device=self.device
         )
+        self.maximum_neighbors_by_atom = torch.zeros(
+            self.num_atoms, dtype=torch.long, device=self.device
+        )
 
     @torch.no_grad()
     def reset_stats(self) -> None:
@@ -287,6 +322,46 @@ class FixedShapeAlchemiNeighborBuilder:
         self.maximum_real_edges.zero_()
         self.maximum_neighbors.zero_()
         self.maximum_capacity_excess.zero_()
+        self.maximum_neighbors_by_atom.zero_()
+        self.skin_misses.zero_()
+        self.skin_rebuilds = 0
+
+    @torch.no_grad()
+    def initialize_skin(self, positions: Tensor) -> None:
+        if self.verlet_skin <= 0:
+            return
+        requested = self.verlet_candidate_capacity
+        slots = max(self.neighbors_per_atom, int(requested)) if requested is not None else max(
+            self.neighbors_per_atom * 2, self.neighbors_per_atom + 32
+        )
+        slots = min(slots, self.candidates_per_centre)
+        selected, counts, selected_valid = select_skin_candidates(
+            positions,
+            self.candidate_sources,
+            -self.candidate_shifts,
+            self.cell,
+            cutoff=self.cutoff + self.verlet_skin,
+            slots_per_atom=slots,
+        )
+        torch._assert_async(
+            (counts <= slots).all(),
+            "NequIP Opt3 Verlet candidate capacity is smaller than the "
+            "cutoff+skin candidate count",
+        )
+        if self.skin_candidate_ids is None:
+            self.skin_candidate_ids = selected
+            self.skin_candidate_mask = selected_valid
+            self.skin_reference_positions = positions.detach().clone()
+        else:
+            if self.skin_candidate_ids.shape != selected.shape:
+                raise RuntimeError("Verlet candidate shape changed during rebuild")
+            self.skin_candidate_ids.copy_(selected)
+            assert self.skin_candidate_mask is not None
+            self.skin_candidate_mask.copy_(selected_valid)
+            assert self.skin_reference_positions is not None
+            self.skin_reference_positions.copy_(positions)
+        self.verlet_candidate_capacity = slots
+        self.skin_rebuilds += 1
 
     @torch.no_grad()
     def build(
@@ -299,38 +374,103 @@ class FixedShapeAlchemiNeighborBuilder:
                 "fixed neighbor builder received positions on wrong device"
             )
 
-        source_positions = positions.index_select(0, self.candidate_sources)
-        shift_vectors = torch.mm(
-            self.candidate_shifts.to(dtype=positions.dtype),
-            self.cell.to(dtype=positions.dtype),
-        )
+        if self.skin_candidate_ids is not None:
+            assert self.skin_reference_positions is not None
+            assert self.skin_candidate_mask is not None
+            skin_miss = displacement_exceeds_skin(
+                positions,
+                self.skin_reference_positions,
+                self.verlet_skin,
+                self.cell,
+                self.pbc,
+                self.inverse_cell,
+            )
+            self.skin_misses.add_(skin_miss.to(torch.long))
+            torch._assert_async(
+                ~skin_miss,
+                "NequIP Opt3 Verlet skin exhausted; rebuild the candidate list",
+            )
+            cached = self.skin_candidate_ids.reshape(-1)
+            source_ids = self.candidate_sources.index_select(0, cached).reshape(
+                self.num_atoms, -1
+            )
+            candidate_shifts = self.candidate_shifts.index_select(
+                0, cached
+            ).reshape(self.num_atoms, -1, 3)
+            candidate_width = int(source_ids.shape[1])
+            shift_vectors = torch.mm(
+                candidate_shifts.reshape(-1, 3).to(dtype=positions.dtype),
+                self.cell.to(dtype=positions.dtype),
+            ).reshape(self.num_atoms, candidate_width, 3)
+            source_positions = positions.index_select(
+                0, source_ids.reshape(-1)
+            ).reshape(self.num_atoms, candidate_width, 3)
+            candidate_ids = torch.arange(
+                candidate_width, dtype=torch.long, device=self.device
+            ).reshape(1, -1).expand(self.num_atoms, -1)
+            vectors = positions.unsqueeze(1) - source_positions + shift_vectors
+            valid_candidates = self.skin_candidate_mask
+        else:
+            source_positions = positions.index_select(0, self.candidate_sources)
+            shift_vectors = torch.mm(
+                self.candidate_shifts.to(dtype=positions.dtype),
+                self.cell.to(dtype=positions.dtype),
+            )
+            candidate_ids = self.candidate_ids.expand(self.num_atoms, -1)
+            candidate_shifts = self.candidate_shifts
+            vectors = (
+                positions.unsqueeze(1)
+                - source_positions.unsqueeze(0)
+                + shift_vectors.unsqueeze(0)
+            )
+            valid_candidates = torch.ones_like(candidate_ids, dtype=torch.bool)
+        candidate_width = int(candidate_ids.shape[1])
         # NequIP convention: r_ij = r_j - r_i + shift @ cell for
         # edge_index=(i, j).
-        vectors = (
-            positions.unsqueeze(1)
-            - source_positions.unsqueeze(0)
-            + shift_vectors.unsqueeze(0)
-        )
         distance_sqr = vectors.square().sum(dim=-1)
-        valid = (distance_sqr <= self.cutoff * self.cutoff) & (distance_sqr > 1.0e-8)
+        valid = (
+            valid_candidates
+            & (distance_sqr <= self.cutoff * self.cutoff)
+            & (distance_sqr > 1.0e-8)
+        )
         counts = valid.sum(dim=1)
-        candidate_ids = self.candidate_ids.expand(self.num_atoms, -1)
         ordered = torch.where(
             valid,
             candidate_ids,
-            torch.full_like(candidate_ids, self.candidates_per_centre),
+            torch.full_like(candidate_ids, candidate_width),
         )
-        selected = torch.topk(
+        selected_matrix = torch.topk(
             ordered,
             k=self.neighbors_per_atom,
             dim=1,
             largest=False,
             sorted=True,
-        ).values.reshape(-1)
-        selected_valid = selected < self.candidates_per_centre
-        safe = selected.clamp_max(self.candidates_per_centre - 1)
-        sources = self.candidate_sources.index_select(0, safe)
-        shifts = self.candidate_shifts.index_select(0, safe)
+        ).values
+        selected_valid_matrix = selected_matrix < candidate_width
+        safe = selected_matrix.clamp_max(candidate_width - 1)
+        if self.skin_candidate_ids is not None:
+            selected_sources = torch.gather(source_ids, 1, safe)
+            selected_shifts = torch.gather(
+                candidate_shifts,
+                1,
+                safe.unsqueeze(-1).expand(-1, -1, 3),
+            )
+        else:
+            selected_sources = self.candidate_sources.index_select(
+                0, safe.reshape(-1)
+            ).reshape(self.num_atoms, -1)
+            selected_shifts = self.candidate_shifts.index_select(
+                0, safe.reshape(-1)
+            ).reshape(self.num_atoms, -1, 3)
+        selected_valid = selected_valid_matrix.reshape(-1).index_select(
+            0, self.selection_indices
+        )
+        sources = selected_sources.reshape(-1).index_select(
+            0, self.selection_indices
+        )
+        shifts = selected_shifts.reshape(-1, 3).index_select(
+            0, self.selection_indices
+        )
         self.edge_index[0].copy_(
             torch.where(selected_valid, sources, self.sink_indices)
         )
@@ -348,7 +488,9 @@ class FixedShapeAlchemiNeighborBuilder:
 
         real_edges = selected_valid.sum()
         maximum = counts.max()
-        excess = torch.clamp_min(maximum - self.neighbors_per_atom, 0)
+        excess = torch.clamp_min(
+            (counts - self.neighbor_capacities).max(), 0
+        )
         overflow = excess > 0
         call_step = self.build_calls if step is None else step
         self.current_real_edges.copy_(real_edges)
@@ -359,6 +501,9 @@ class FixedShapeAlchemiNeighborBuilder:
             torch.maximum(self.maximum_real_edges, real_edges)
         )
         self.maximum_neighbors.copy_(torch.maximum(self.maximum_neighbors, maximum))
+        self.maximum_neighbors_by_atom.copy_(
+            torch.maximum(self.maximum_neighbors_by_atom, counts)
+        )
         self.maximum_capacity_excess.copy_(
             torch.maximum(self.maximum_capacity_excess, excess)
         )
@@ -392,6 +537,14 @@ class FixedShapeAlchemiNeighborBuilder:
             "fixed_builder_first_overflow_step": first if first >= 0 else None,
             "fixed_builder_edge_capacity": self.edge_capacity,
             "fixed_builder_neighbors_per_atom": self.neighbors_per_atom,
+            "fixed_builder_neighbor_capacities": self.neighbor_capacities.detach()
+            .to(device="cpu")
+            .tolist(),
+            "fixed_builder_capacity_policy": (
+                "per-atom-cap"
+                if self.neighbor_capacities.unique().numel() > 1
+                else "uniform-cap"
+            ),
             "fixed_builder_min_real_edges": minimum,
             "fixed_builder_max_real_edges": maximum,
             "fixed_builder_max_padding_fraction": (
@@ -400,8 +553,28 @@ class FixedShapeAlchemiNeighborBuilder:
                 else (self.edge_capacity - minimum) / self.edge_capacity
             ),
             "fixed_builder_max_neighbors": int(self.maximum_neighbors.item()),
+            "fixed_builder_maximum_neighbors_by_atom": self.maximum_neighbors_by_atom.detach()
+            .to(device="cpu")
+            .tolist(),
             "fixed_builder_max_capacity_excess": int(
                 self.maximum_capacity_excess.item()
+            ),
+            "fixed_builder_verlet_skin": self.verlet_skin,
+            "fixed_builder_verlet_candidate_capacity": self.verlet_candidate_capacity,
+            "fixed_builder_verlet_skin_misses": int(self.skin_misses.item()),
+            "fixed_builder_verlet_rebuilds": self.skin_rebuilds,
+            "fixed_builder_verlet_enabled": self.skin_candidate_ids is not None,
+            "fixed_builder_active_candidate_slots": self.num_atoms
+            * (
+                int(self.skin_candidate_ids.shape[1])
+                if self.skin_candidate_ids is not None
+                else self.candidates_per_centre
+            ),
+            "fixed_builder_candidate_reduction_fraction": (
+                0.0
+                if self.skin_candidate_ids is None
+                else 1.0
+                - int(self.skin_candidate_ids.shape[1]) / self.candidates_per_centre
             ),
             "fixed_builder_candidate_universe_size": (
                 self.num_atoms * self.candidates_per_centre
@@ -452,6 +625,7 @@ class WholeStepCUDAGraphMD:
         *,
         device: torch.device,
         options: dict[str, Any],
+        neighbor_capacities: list[int] | Tensor | None = None,
     ) -> None:
         try:
             import torch_sim as ts
@@ -470,6 +644,11 @@ class WholeStepCUDAGraphMD:
         self.capture_warmup = int(options.get("capture_warmup", 3))
         if self.capture_warmup < 0:
             raise ValueError("capture_warmup must be non-negative")
+        self.verlet_rebuild_interval = int(
+            options.get("verlet_rebuild_interval", 0)
+        )
+        if self.verlet_rebuild_interval < 0:
+            raise ValueError("verlet_rebuild_interval must be non-negative")
         atomic_numbers = torch.as_tensor(
             atoms.get_atomic_numbers(), dtype=torch.long, device=device
         )
@@ -524,6 +703,36 @@ class WholeStepCUDAGraphMD:
         neighbors_per_atom, requested_total = _neighbors_per_atom(
             exact_edge_index, num_atoms=self.num_atoms, options=options
         )
+        initial_counts = torch.bincount(
+            exact_edge_index[1], minlength=self.num_atoms
+        )[: self.num_atoms]
+        if neighbor_capacities is None and options.get("per_atom_cap", False):
+            capacities = capacities_from_counts(
+                initial_counts,
+                factor=float(options.get("edge_capacity_factor", 1.10)),
+                headroom=1,
+                alignment=int(options.get("neighbor_capacity_slot_step", 8)),
+            )
+        else:
+            capacities = normalize_neighbor_capacities(
+                neighbor_capacities,
+                num_atoms=self.num_atoms,
+                default=neighbors_per_atom,
+            )
+        initial_excess = torch.clamp_min(
+            initial_counts
+            - torch.as_tensor(capacities, dtype=torch.long, device=device),
+            0,
+        )
+        if bool(initial_excess.max().item() > 0):
+            raise RuntimeError(
+                "NequIP Opt3 per-centre capacity vector is smaller than the "
+                "initial graph"
+            )
+        self.neighbor_capacities = capacities
+        if neighbor_capacities is None and options.get("per_atom_cap", False):
+            self.capacity_source = "initial-per-atom-cap-vector"
+        neighbors_per_atom = max(capacities)
         self.requested_total_edge_capacity = requested_total
         if options.get("neighbors_per_atom") is not None:
             self.capacity_source = (
@@ -537,7 +746,7 @@ class WholeStepCUDAGraphMD:
                 if requested_total is not None
                 else "initial-per-atom-auto"
             )
-        edge_capacity = self.num_atoms * neighbors_per_atom
+        edge_capacity = int(sum(capacities))
         self.static_inputs: dict[str, Tensor] = {}
         for key, value in exact_inputs.items():
             if key == AtomicDataDict.POSITIONS_KEY:
@@ -564,9 +773,15 @@ class WholeStepCUDAGraphMD:
             pbc=builder_pbc,
             cutoff=float(calculator.model.metadata["r_max"]),
             neighbors_per_atom=neighbors_per_atom,
+            neighbor_capacities=capacities,
             output_edge_index=self.static_inputs[AtomicDataDict.EDGE_INDEX_KEY],
             output_edge_shift=self.static_inputs[AtomicDataDict.EDGE_CELL_SHIFT_KEY],
+            verlet_skin=float(options.get("verlet_skin", 0.0)),
+            verlet_candidate_capacity=options.get("verlet_candidate_capacity"),
         )
+        self.builder.initialize_skin(initial_state.positions)
+        if self.builder.verlet_skin <= 0:
+            self.verlet_rebuild_interval = 0
         self.builder.build(initial_state.positions)
         official_signature = _edge_signature(
             exact_inputs[AtomicDataDict.EDGE_INDEX_KEY],
@@ -1011,6 +1226,7 @@ class WholeStepCUDAGraphMD:
             raise RuntimeError("capture must complete before production")
         self.restore_(initial)
         self.builder.reset_stats()
+        self.builder.initialize_skin(self.positions)
         self.production_replays = 0
 
     def evaluate_initial(self) -> ModelOutput:
@@ -1026,6 +1242,11 @@ class WholeStepCUDAGraphMD:
     def step(self) -> ModelOutput:
         if self.graph is None:
             raise RuntimeError("capture must complete before replay")
+        if (
+            self.verlet_rebuild_interval
+            and self.production_replays % self.verlet_rebuild_interval == 0
+        ):
+            self.builder.initialize_skin(self.positions)
         self.graph.replay()
         self.production_replays += 1
         self.total_replays += 1
@@ -1145,6 +1366,7 @@ def run_md(request: MDRunRequest) -> MDRunResult:
         initial,
         device=device,
         options=request.options,
+        neighbor_capacities=request.options.get("neighbor_capacities"),
     )
     engine.capture(initial)
     engine.validate_one_step(initial, options=request.options)
@@ -1229,7 +1451,12 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             "initial_maximum_neighbors": engine.initial_maximum_neighbors,
             "edge_capacity_source": engine.capacity_source,
             "capacity_total_to_per_atom_guard_slots": 0,
-            "edge_capacity_policy": "esen_cap_uniform_per_centre",
+            "edge_capacity_policy": (
+                "esen_cap_per_atom"
+                if len(set(engine.neighbor_capacities)) > 1
+                else "esen_cap_uniform_per_centre"
+            ),
+            "neighbor_capacities": engine.neighbor_capacities,
             "edge_overflow_policy": "device_detect_raise_at_sync_no_fallback",
             "edge_padding": "distributed_far_periodic_self_edge_zero_cutoff",
             "sink_padding": "distributed_far_periodic_self_edge_zero_cutoff",
@@ -1265,6 +1492,7 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             "stress_supported": False,
             "warmup_steps": config.warmup_steps,
             "capture_warmup": engine.capture_warmup,
+            "verlet_rebuild_interval": engine.verlet_rebuild_interval,
             "warmup_state_restored": True,
             "transactional_recovery": False,
             "transaction_rollback": False,
