@@ -637,6 +637,8 @@ class WholeStepCUDAGraphMD:
 
         from nequip.integrations.torchsim import NequIPTorchSimCalc
         from nequip.md_stages.opt1 import _assert_plain_eager_model
+        enable_cueq = bool(options.get("_opt4_enable_cueq", False))
+        self.cueq_enabled = enable_cueq
 
         self.device = device
         self.num_atoms = len(atoms)
@@ -663,7 +665,17 @@ class WholeStepCUDAGraphMD:
             atomic_numbers=atomic_numbers,
             system_idx=system_idx,
         )
-        _assert_plain_eager_model(calculator.model)
+        if enable_cueq:
+            try:
+                from nequip.nn._tp_scatter_base import TensorProductScatter
+
+                TensorProductScatter.enable_CuEquivariance(calculator.model)
+            except Exception as exc:
+                raise RuntimeError(
+                    "NequIP Opt4 cuEquivariance fusion could not be enabled"
+                ) from exc
+        else:
+            _assert_plain_eager_model(calculator.model)
         calculator.compute_forces = False
         calculator.compute_stress = False
         self.calculator = calculator
@@ -1505,6 +1517,11 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             "performance_profile": performance_profile,
             **builder_stats,
             **OPT3_POLICY,
+            "cuequivariance": bool(engine.cueq_enabled),
+            "tensor_product_accelerator": (
+                "cuequivariance" if engine.cueq_enabled else None
+            ),
+            "model_specific_fusion": bool(engine.cueq_enabled),
         },
     )
     validate_result(request, result)
