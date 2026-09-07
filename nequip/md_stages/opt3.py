@@ -26,8 +26,6 @@ import numpy as np
 import torch
 from ase import Atoms, units
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
-from torch import Tensor
-
 from md_benchmark.md_route import (
     MDObservation,
     MDRunRequest,
@@ -41,10 +39,19 @@ from md_benchmark.neighbor_utils import (
     normalize_neighbor_capacities,
     select_skin_candidates,
 )
+from md_benchmark.opt3_profile import (
+    model_nvtx_ranges,
+    nvtx_range,
+    nvtx_stage,
+    nvtx_steps,
+    profile_opt3,
+)
 from md_benchmark.performance import (
     CudaPhaseProfiler,
     performance_profile_requested,
 )
+from torch import Tensor
+
 from nequip.data import AtomicDataDict
 from nequip.md_stages.opt1 import (
     BerendsenIntegrator,
@@ -62,7 +69,6 @@ from nequip.md_stages.opt2 import (
     _assert_close,
     _max_abs,
 )
-
 
 OPT3_POLICY = {
     "gpu_resident": True,
@@ -628,8 +634,8 @@ class WholeStepCUDAGraphMD:
         neighbor_capacities: list[int] | Tensor | None = None,
     ) -> None:
         try:
-            import torch_sim as ts
             import nvalchemiops  # noqa: F401
+            import torch_sim as ts
         except ImportError as exc:
             raise RuntimeError(
                 "NequIP Opt3 requires torch-sim and nvalchemiops"
@@ -1022,6 +1028,7 @@ class WholeStepCUDAGraphMD:
         advanced = self.positions + integrator.dt * half / integrator.masses
         return half, advanced, eta_half, p_eta_half
 
+    @nvtx_stage("integrator_thermostat")
     def _graph_body(self) -> None:
         with torch.no_grad():
             old_momenta = self.momenta
@@ -1033,9 +1040,11 @@ class WholeStepCUDAGraphMD:
             )
             self.model_positions.copy_(evaluation_positions)
             graph_step = self.step_counter + self.advance.to(torch.long)
-            self.builder.build(self.model_positions, step=graph_step)
+            with nvtx_range("neighbor_geometry"):
+                self.builder.build(self.model_positions, step=graph_step)
 
-        model_energy, model_forces = self.wrapper(self.static_inputs)
+        with model_nvtx_ranges(self.wrapper):
+            model_energy, model_forces = self.wrapper(self.static_inputs)
 
         with torch.no_grad():
             forces = model_forces.to(dtype=self.positions.dtype)
@@ -1337,6 +1346,7 @@ def _validate_finite(state: GPUMDState) -> None:
         raise FloatingPointError(f"NequIP Opt3 final state has non-finite {invalid}")
 
 
+@profile_opt3
 def run_md(request: MDRunRequest) -> MDRunResult:
     """Run strict whole-step CUDA Graph NequIP NVT MD."""
 
@@ -1369,7 +1379,7 @@ def run_md(request: MDRunRequest) -> MDRunResult:
     if not isinstance(integrator, (BerendsenIntegrator, NoseHooverChainIntegrator)):
         raise TypeError("NequIP Opt3 received an unsupported integrator")
     profiler = CudaPhaseProfiler(
-        enabled=performance_profile_requested(request.options), device=device
+        enabled=performance_profile_requested(request.options), device=device, prefix="opt3"
     )
     engine = WholeStepCUDAGraphMD(
         atoms,
@@ -1396,7 +1406,7 @@ def run_md(request: MDRunRequest) -> MDRunResult:
     if config.collect_statistics and 0 in observation_steps:
         engine.raise_for_overflow()
         observations.append(_observation(state, step=0, masses=masses))
-    for step in range(1, config.steps + 1):
+    for step in nvtx_steps(config.steps, device):
         with profiler.phase("whole_step_cuda_graph_replay"):
             state.output = engine.step()
         if config.collect_statistics and step in observation_steps:
