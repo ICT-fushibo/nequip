@@ -1,4 +1,4 @@
-"""NequIP Opt4 route with optional cuEquivariance TP/scatter fusion."""
+"""Opt4 explicit, validated candidate dispatch; Opt3 remains the off path."""
 
 from __future__ import annotations
 
@@ -11,22 +11,8 @@ from . import opt3
 def run_md(request: MDRunRequest) -> MDRunResult:
     if request.model != "nequip" or request.stage != "opt4":
         raise ValueError(f"NequIP Opt4 route received {request.model}/{request.stage}")
-    result, policy = run_opt4_with_opt3(request, opt3.run_md, model="nequip")
+    result, _policy = run_opt4_with_opt3(request, opt3.run_md, model="nequip")
     result.stage = "opt4"
-    result.metadata.update(policy.metadata)
-    result.metadata.update(
-        {
-            "opt4_model_strategy": "cuequivariance-tensor-product-scatter",
-            "opt4_fused_components": [
-                "edge-length-radial-layout",
-                "tensor-product",
-                "destination-scatter",
-            ],
-            "opt4_fixed_address_buffers": True,
-            "opt4_custom_kernel": False,
-            "opt4_reverse_edge_verified": False,
-        }
-    )
     validate_result(request, result)
     return result
 

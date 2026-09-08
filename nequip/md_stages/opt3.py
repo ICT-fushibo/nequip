@@ -685,6 +685,10 @@ class WholeStepCUDAGraphMD:
         calculator.compute_forces = False
         calculator.compute_stress = False
         self.calculator = calculator
+        if options.get("_opt4_passes"):
+            from md_benchmark.opt4_registry import prepare_model
+            from .opt4_fusion import install
+            prepare_model(calculator.model, options, install)
         self.wrapper = ForceOnlyEnergyVJP.from_released_graph_model(
             calculator.model
         ).eval()
