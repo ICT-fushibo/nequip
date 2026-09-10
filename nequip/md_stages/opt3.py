@@ -32,6 +32,15 @@ from md_benchmark.md_route import (
     MDRunResult,
     validate_result,
 )
+from md_benchmark.cap1_rob1 import (
+    FixedAddressStateSnapshot,
+    Rob1Controller,
+    Rob1WindowStatus,
+    VerletCandidateCapacityError,
+    read_rob1_window_status,
+    transaction_boundaries,
+    verlet_rebuild_due,
+)
 from md_benchmark.neighbor_utils import (
     capacities_from_counts,
     displacement_exceeds_skin,
@@ -209,6 +218,7 @@ class FixedShapeAlchemiNeighborBuilder:
         output_edge_shift: Tensor,
         verlet_skin: float = 0.0,
         verlet_candidate_capacity: int | None = None,
+        overflow_to_dummy_only: bool = False,
     ) -> None:
         if num_atoms < 2:
             raise ValueError("fixed neighbor builder requires at least two atoms")
@@ -233,6 +243,7 @@ class FixedShapeAlchemiNeighborBuilder:
         self.neighbor_capacities = torch.as_tensor(
             capacities, dtype=torch.long, device=cell.device
         )
+        self.overflow_to_dummy_only = bool(overflow_to_dummy_only)
         if verlet_skin < 0:
             raise ValueError("verlet_skin must be non-negative")
         self.verlet_skin = float(verlet_skin)
@@ -317,6 +328,18 @@ class FixedShapeAlchemiNeighborBuilder:
         self.maximum_neighbors_by_atom = torch.zeros(
             self.num_atoms, dtype=torch.long, device=self.device
         )
+        self.overflow_dummy_only_replays = torch.zeros(
+            (), dtype=torch.long, device=self.device
+        )
+        self.window_capacity_misses = torch.zeros(
+            (), dtype=torch.long, device=self.device
+        )
+        self.window_overflow_dummy_only_replays = torch.zeros(
+            (), dtype=torch.long, device=self.device
+        )
+        self.window_maximum_neighbors_by_atom = torch.zeros(
+            self.num_atoms, dtype=torch.long, device=self.device
+        )
 
     @torch.no_grad()
     def reset_stats(self) -> None:
@@ -331,6 +354,14 @@ class FixedShapeAlchemiNeighborBuilder:
         self.maximum_neighbors_by_atom.zero_()
         self.skin_misses.zero_()
         self.skin_rebuilds = 0
+        self.overflow_dummy_only_replays.zero_()
+        self.reset_window_stats()
+
+    @torch.no_grad()
+    def reset_window_stats(self) -> None:
+        self.window_capacity_misses.zero_()
+        self.window_overflow_dummy_only_replays.zero_()
+        self.window_maximum_neighbors_by_atom.zero_()
 
     @torch.no_grad()
     def initialize_skin(self, positions: Tensor) -> None:
@@ -349,11 +380,11 @@ class FixedShapeAlchemiNeighborBuilder:
             cutoff=self.cutoff + self.verlet_skin,
             slots_per_atom=slots,
         )
-        torch._assert_async(
-            (counts <= slots).all(),
-            "NequIP Opt3 Verlet candidate capacity is smaller than the "
-            "cutoff+skin candidate count",
-        )
+        if bool((counts > slots).any().item()):
+            raise VerletCandidateCapacityError(
+                "NequIP Opt3 Verlet candidate capacity is smaller than the "
+                "cutoff+skin candidate count"
+            )
         if self.skin_candidate_ids is None:
             self.skin_candidate_ids = selected
             self.skin_candidate_mask = selected_valid
@@ -392,10 +423,11 @@ class FixedShapeAlchemiNeighborBuilder:
                 self.inverse_cell,
             )
             self.skin_misses.add_(skin_miss.to(torch.long))
-            torch._assert_async(
-                ~skin_miss,
-                "NequIP Opt3 Verlet skin exhausted; rebuild the candidate list",
-            )
+            if not self.overflow_to_dummy_only:
+                torch._assert_async(
+                    ~skin_miss,
+                    "NequIP Opt3 Verlet skin exhausted; rebuild the candidate list",
+                )
             cached = self.skin_candidate_ids.reshape(-1)
             source_ids = self.candidate_sources.index_select(0, cached).reshape(
                 self.num_atoms, -1
@@ -477,27 +509,32 @@ class FixedShapeAlchemiNeighborBuilder:
         shifts = selected_shifts.reshape(-1, 3).index_select(
             0, self.selection_indices
         )
-        self.edge_index[0].copy_(
-            torch.where(selected_valid, sources, self.sink_indices)
-        )
-        self.edge_index[1].copy_(
-            torch.where(selected_valid, self.slot_centres, self.sink_indices)
-        )
-        self.edge_shift.copy_(
-            torch.where(
-                selected_valid.unsqueeze(1),
-                shifts.to(dtype=self.edge_shift.dtype),
-                self.padding_shifts,
-            )
-        )
-        self.active_mask.copy_(selected_valid)
-
-        real_edges = selected_valid.sum()
         maximum = counts.max()
         excess = torch.clamp_min(
             (counts - self.neighbor_capacities).max(), 0
         )
         overflow = excess > 0
+        output_valid = (
+            selected_valid & ~overflow
+            if self.overflow_to_dummy_only
+            else selected_valid
+        )
+        self.edge_index[0].copy_(
+            torch.where(output_valid, sources, self.sink_indices)
+        )
+        self.edge_index[1].copy_(
+            torch.where(output_valid, self.slot_centres, self.sink_indices)
+        )
+        self.edge_shift.copy_(
+            torch.where(
+                output_valid.unsqueeze(1),
+                shifts.to(dtype=self.edge_shift.dtype),
+                self.padding_shifts,
+            )
+        )
+        self.active_mask.copy_(output_valid)
+
+        real_edges = output_valid.sum()
         call_step = self.build_calls if step is None else step
         self.current_real_edges.copy_(real_edges)
         self.minimum_real_edges.copy_(
@@ -514,12 +551,34 @@ class FixedShapeAlchemiNeighborBuilder:
             torch.maximum(self.maximum_capacity_excess, excess)
         )
         self.capacity_misses.add_(overflow.to(torch.long))
+        self.window_maximum_neighbors_by_atom.copy_(
+            torch.maximum(self.window_maximum_neighbors_by_atom, counts)
+        )
+        if self.overflow_to_dummy_only:
+            self.window_capacity_misses.add_(overflow.to(torch.long))
+            self.overflow_dummy_only_replays.add_(overflow.to(torch.long))
+            self.window_overflow_dummy_only_replays.add_(overflow.to(torch.long))
         first = (self.first_overflow_step < 0) & overflow
         self.first_overflow_step.copy_(
             torch.where(first, call_step, self.first_overflow_step)
         )
         self.build_calls.add_(1)
         return self.edge_index, self.edge_shift
+
+    def window_stats(self) -> dict[str, Any]:
+        return {
+            "fixed_builder_window_capacity_misses": int(
+                self.window_capacity_misses.item()
+            ),
+            "fixed_builder_window_overflow_dummy_only_replays": int(
+                self.window_overflow_dummy_only_replays.item()
+            ),
+            "fixed_builder_window_maximum_neighbors_by_atom": (
+                self.window_maximum_neighbors_by_atom.detach()
+                .to(device="cpu")
+                .tolist()
+            ),
+        }
 
     def raise_for_overflow(self) -> None:
         misses = int(self.capacity_misses.item())
@@ -540,6 +599,10 @@ class FixedShapeAlchemiNeighborBuilder:
         return {
             "fixed_builder_build_calls": calls,
             "fixed_builder_capacity_misses": misses,
+            "overflow_to_dummy_only": self.overflow_to_dummy_only,
+            "overflow_dummy_only_replays": int(
+                self.overflow_dummy_only_replays.item()
+            ),
             "fixed_builder_first_overflow_step": first if first >= 0 else None,
             "fixed_builder_edge_capacity": self.edge_capacity,
             "fixed_builder_neighbors_per_atom": self.neighbors_per_atom,
@@ -632,6 +695,7 @@ class WholeStepCUDAGraphMD:
         device: torch.device,
         options: dict[str, Any],
         neighbor_capacities: list[int] | Tensor | None = None,
+        shared_calculator: Any | None = None,
     ) -> None:
         try:
             import nvalchemiops  # noqa: F401
@@ -661,31 +725,34 @@ class WholeStepCUDAGraphMD:
             atoms.get_atomic_numbers(), dtype=torch.long, device=device
         )
         system_idx = torch.zeros(self.num_atoms, dtype=torch.long, device=device)
-        calculator = NequIPTorchSimCalc.from_saved_model(
-            model_path=model_path,
-            device=device,
-            chemical_species_to_atom_type_map=True,
-            allow_tf32=False,
-            compile_mode="eager",
-            neighborlist_backend="alchemiops",
-            atomic_numbers=atomic_numbers,
-            system_idx=system_idx,
-        )
-        if enable_cueq:
-            try:
-                from nequip.nn._tp_scatter_base import TensorProductScatter
+        if shared_calculator is None:
+            calculator = NequIPTorchSimCalc.from_saved_model(
+                model_path=model_path,
+                device=device,
+                chemical_species_to_atom_type_map=True,
+                allow_tf32=False,
+                compile_mode="eager",
+                neighborlist_backend="alchemiops",
+                atomic_numbers=atomic_numbers,
+                system_idx=system_idx,
+            )
+            if enable_cueq:
+                try:
+                    from nequip.nn._tp_scatter_base import TensorProductScatter
 
-                TensorProductScatter.enable_CuEquivariance(calculator.model)
-            except Exception as exc:
-                raise RuntimeError(
-                    "NequIP Opt4 cuEquivariance fusion could not be enabled"
-                ) from exc
+                    TensorProductScatter.enable_CuEquivariance(calculator.model)
+                except Exception as exc:
+                    raise RuntimeError(
+                        "NequIP Opt4 cuEquivariance fusion could not be enabled"
+                    ) from exc
+            else:
+                _assert_plain_eager_model(calculator.model)
         else:
-            _assert_plain_eager_model(calculator.model)
+            calculator = shared_calculator
         calculator.compute_forces = False
         calculator.compute_stress = False
         self.calculator = calculator
-        if options.get("_opt4_passes"):
+        if shared_calculator is None and options.get("_opt4_passes"):
             from md_benchmark.opt4_registry import prepare_model
             from .opt4_fusion import install
             prepare_model(calculator.model, options, install)
@@ -800,6 +867,9 @@ class WholeStepCUDAGraphMD:
             output_edge_shift=self.static_inputs[AtomicDataDict.EDGE_CELL_SHIFT_KEY],
             verlet_skin=float(options.get("verlet_skin", 0.0)),
             verlet_candidate_capacity=options.get("verlet_candidate_capacity"),
+            overflow_to_dummy_only=bool(
+                options.get("overflow_to_dummy_only", False)
+            ),
         )
         self.builder.initialize_skin(initial_state.positions)
         if self.builder.verlet_skin <= 0:
@@ -1129,6 +1199,8 @@ class WholeStepCUDAGraphMD:
             "momenta": self.momenta.data_ptr(),
             "forces": self.forces.data_ptr(),
             "energy": self.energy.data_ptr(),
+            "advance": self.advance.data_ptr(),
+            "step_counter": self.step_counter.data_ptr(),
             "model_positions": self.model_positions.data_ptr(),
             "edge_index": self.builder.edge_index.data_ptr(),
             "edge_shift": self.builder.edge_shift.data_ptr(),
@@ -1267,10 +1339,18 @@ class WholeStepCUDAGraphMD:
     def step(self) -> ModelOutput:
         if self.graph is None:
             raise RuntimeError("capture must complete before replay")
-        if (
-            self.verlet_rebuild_interval
-            and self.production_replays % self.verlet_rebuild_interval == 0
-        ):
+        if self.builder.overflow_to_dummy_only:
+            rebuild = verlet_rebuild_due(
+                self.production_replays,
+                self.verlet_rebuild_interval,
+                includes_initial_force=True,
+            )
+        else:
+            rebuild = bool(
+                self.verlet_rebuild_interval
+                and self.production_replays % self.verlet_rebuild_interval == 0
+            )
+        if rebuild:
             self.builder.initialize_skin(self.positions)
         self.graph.replay()
         self.production_replays += 1
@@ -1282,6 +1362,50 @@ class WholeStepCUDAGraphMD:
 
     def raise_for_overflow(self) -> None:
         self.builder.raise_for_overflow()
+
+    def state_tensors(self) -> dict[str, Tensor]:
+        state = {
+            "positions": self.positions,
+            "momenta": self.momenta,
+            "forces": self.forces,
+            "energy": self.energy,
+            "advance": self.advance,
+            "step_counter": self.step_counter,
+        }
+        if self.thermostat_eta is not None:
+            state["eta"] = self.thermostat_eta
+            assert self.thermostat_p_eta is not None
+            state["p_eta"] = self.thermostat_p_eta
+        return state
+
+    def reset_window_stats(self) -> None:
+        self.builder.reset_window_stats()
+
+    def window_status(self) -> Rob1WindowStatus:
+        return read_rob1_window_status(
+            capacity_misses=self.builder.window_capacity_misses,
+            overflow_dummy_only_replays=(
+                self.builder.window_overflow_dummy_only_replays
+            ),
+            maximum_required_by_atom=(
+                self.builder.window_maximum_neighbors_by_atom
+            ),
+            verlet_skin_misses=self.builder.skin_misses,
+        )
+
+    def stats(self) -> dict[str, Any]:
+        return {
+            **self.builder.stats(),
+            "cuda_graph_capture_count": self.capture_count,
+            "cuda_graph_capture_wall_time_s": self.capture_wall_time_s,
+            "cuda_graph_production_replays": self.production_replays,
+            "cuda_graph_replay_output_addresses_stable": (
+                self.output_addresses_stable
+            ),
+        }
+
+    def release(self) -> None:
+        self.graph = None
 
 
 def _validate_request(request: MDRunRequest) -> Path:
@@ -1396,7 +1520,68 @@ def run_md(request: MDRunRequest) -> MDRunResult:
     )
     engine.capture(initial)
     engine.validate_one_step(initial, options=request.options)
-    engine.reset_production(initial)
+    rob1_enabled = bool(request.options.get("_opt4_rob1", False))
+    controller: Rob1Controller | None = None
+    if rob1_enabled:
+        shared_calculator = engine.calculator
+
+        def generation_factory(
+            promoted: tuple[int, ...], snapshot: dict[str, Tensor]
+        ) -> WholeStepCUDAGraphMD:
+            recovery_initial = _InitialState(
+                positions=snapshot["positions"].clone(),
+                momenta=snapshot["momenta"].clone(),
+            )
+            recovery_integrator = _build_integrator(request, masses)
+            if not isinstance(
+                recovery_integrator,
+                (BerendsenIntegrator, NoseHooverChainIntegrator),
+            ):
+                raise TypeError("NequIP ROB1 received an unsupported integrator")
+            generation = WholeStepCUDAGraphMD(
+                atoms,
+                str(model_path),
+                recovery_integrator,
+                recovery_initial,
+                device=device,
+                options=request.options,
+                neighbor_capacities=list(promoted),
+                shared_calculator=shared_calculator,
+            )
+            generation.capture(recovery_initial)
+            generation.validate_one_step(
+                recovery_initial, options=request.options
+            )
+            generation.production_replays = int(
+                snapshot["step_counter"].detach().cpu()
+            ) + 1
+            return generation
+
+        controller = Rob1Controller(
+            engine,
+            generation_factory=generation_factory,
+            atomic_numbers=atoms.get_atomic_numbers(),
+            neighbor_capacities=engine.neighbor_capacities,
+        )
+        physical_initial = FixedAddressStateSnapshot(engine.state_tensors())
+        if config.warmup_steps:
+            controller.evaluate_initial()
+            warmup_done = 0
+            for boundary in transaction_boundaries(
+                config.warmup_steps,
+                window_steps=int(request.options["rob1_window_steps"]),
+                verlet_rebuild_interval=engine.verlet_rebuild_interval,
+            ):
+                controller.run_steps(boundary - warmup_done)
+                warmup_done = boundary
+        physical_initial.restore_into_(controller.generation.state_tensors())
+        engine = controller.generation
+        engine.builder.reset_stats()
+        engine.builder.initialize_skin(engine.positions)
+        engine.production_replays = 0
+        controller.begin_production()
+    else:
+        engine.reset_production(initial)
     state = GPUMDState(engine.positions, engine.momenta)
     observations: list[MDObservation] = []
     observation_steps = set(config.observation_steps)
@@ -1406,32 +1591,64 @@ def run_md(request: MDRunRequest) -> MDRunResult:
     profiler.start()
     started = time.perf_counter()
     with profiler.phase("whole_step_cuda_graph_replay"):
-        state.output = engine.evaluate_initial()
+        state.output = (
+            engine.evaluate_initial()
+            if controller is None
+            else controller.evaluate_initial()
+        )
+        if controller is not None:
+            engine = controller.generation
+            state = GPUMDState(engine.positions, engine.momenta, state.output)
     if config.collect_statistics and 0 in observation_steps:
         engine.raise_for_overflow()
         observations.append(_observation(state, step=0, masses=masses))
-    for step in nvtx_steps(config.steps, device):
-        with profiler.phase("whole_step_cuda_graph_replay"):
-            state.output = engine.step()
-        if config.collect_statistics and step in observation_steps:
-            # Observation already synchronizes energy/forces to the host.  Read
-            # the device overflow telemetry at the same synchronization point.
-            engine.raise_for_overflow()
-            observations.append(_observation(state, step=step, masses=masses))
+    if controller is None:
+        for step in nvtx_steps(config.steps, device):
+            with profiler.phase("whole_step_cuda_graph_replay"):
+                state.output = engine.step()
+            if config.collect_statistics and step in observation_steps:
+                # Observation already synchronizes energy/forces to the host.
+                engine.raise_for_overflow()
+                observations.append(_observation(state, step=step, masses=masses))
+    else:
+        completed = 0
+        for step in transaction_boundaries(
+            config.steps,
+            window_steps=int(request.options["rob1_window_steps"]),
+            observation_steps=(
+                config.observation_steps if config.collect_statistics else ()
+            ),
+            verlet_rebuild_interval=engine.verlet_rebuild_interval,
+        ):
+            with profiler.phase("whole_step_cuda_graph_replay"):
+                output = controller.run_steps(step - completed)
+            completed = step
+            engine = controller.generation
+            state = GPUMDState(engine.positions, engine.momenta, output)
+            if config.collect_statistics and step in observation_steps:
+                observations.append(_observation(state, step=step, masses=masses))
     torch.cuda.synchronize(device)
-    engine.raise_for_overflow()
+    if controller is None:
+        engine.raise_for_overflow()
     profiler.stop()
     elapsed = time.perf_counter() - started
     performance_profile = profiler.summary(synchronize=False)
     peak_memory_gb = torch.cuda.max_memory_allocated(device) / 1.0e9
     expected_replays = config.steps + 1
-    if engine.production_replays != expected_replays:
+    actual_replays = (
+        engine.production_replays
+        if controller is None
+        else controller.committed_replays
+    )
+    if actual_replays != expected_replays:
         raise RuntimeError(
             "NequIP Opt3 production replay count mismatch: "
-            f"expected {expected_replays}, observed {engine.production_replays}"
+            f"expected {expected_replays}, observed {actual_replays}"
         )
     _validate_finite(state)
-    builder_stats = engine.builder.stats()
+    builder_stats = (
+        engine.builder.stats() if controller is None else controller.stats()
+    )
 
     final_atoms = _frame(atoms, state, step=config.steps, require_stress=False)
     result = MDRunResult(
@@ -1483,7 +1700,11 @@ def run_md(request: MDRunRequest) -> MDRunResult:
                 else "esen_cap_uniform_per_centre"
             ),
             "neighbor_capacities": engine.neighbor_capacities,
-            "edge_overflow_policy": "device_detect_raise_at_sync_no_fallback",
+            "edge_overflow_policy": (
+                "rob1_rollback_promote_recapture_no_fallback"
+                if rob1_enabled
+                else "device_detect_raise_at_sync_no_fallback"
+            ),
             "edge_padding": "distributed_far_periodic_self_edge_zero_cutoff",
             "sink_padding": "distributed_far_periodic_self_edge_zero_cutoff",
             "sink_padding_uses_extra_atoms": False,
@@ -1504,11 +1725,15 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             "validation_max_abs": engine.validation_max_abs,
             "numerical_validation_failure_policy": "report_only",
             "capture_failure_policy": "raise_no_fallback",
-            "cuda_graph_capture_count": engine.capture_count,
-            "capture_count": engine.capture_count,
+            "cuda_graph_capture_count": builder_stats.get(
+                "rob1_total_capture_count", engine.capture_count
+            ),
+            "capture_count": builder_stats.get(
+                "rob1_total_capture_count", engine.capture_count
+            ),
             "graph_capture_scope": "whole-md-step",
-            "production_replays": engine.production_replays,
-            "cuda_graph_production_replays": engine.production_replays,
+            "production_replays": actual_replays,
+            "cuda_graph_production_replays": actual_replays,
             "expected_production_replays": expected_replays,
             "cuda_graph_replay_output_addresses_stable": (
                 engine.output_addresses_stable
@@ -1520,8 +1745,8 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             "capture_warmup": engine.capture_warmup,
             "verlet_rebuild_interval": engine.verlet_rebuild_interval,
             "warmup_state_restored": True,
-            "transactional_recovery": False,
-            "transaction_rollback": False,
+            "transactional_recovery": rob1_enabled,
+            "transaction_rollback": rob1_enabled,
             "neighbor_list_inside_cuda_graph": True,
             "cuda_graph_neighbor_build_inside": True,
             "capacity_overflow_count": int(
