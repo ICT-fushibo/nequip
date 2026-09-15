@@ -41,13 +41,18 @@ class _FixedCSR(nn.Module):
 class _TensorProductScatterCSR(nn.Module):
     """Instance-local adapter; the packaged checkpoint class is untouched."""
 
-    def __init__(self, original, region):
+    def __init__(self, original, region, edge_capacity):
         super().__init__()
         self.original = original
         self._opt4_tp_scatter_csr = region
+        self._opt4_edge_capacity = int(edge_capacity)
 
     def forward(self, x, edge_attr, edge_weight, edge_dst, edge_src):
-        del edge_dst
+        # Model setup validates an exact compact neighbor list before the fixed
+        # CUDA-Graph batch is built.  Only the latter has CAP-sized destination-
+        # major slots, so compact inputs must retain the packaged implementation.
+        if edge_src.shape[0] != self._opt4_edge_capacity:
+            return self.original(x, edge_attr, edge_weight, edge_dst, edge_src)
         edge_features = self.original.tp(x[edge_src], edge_attr, edge_weight)
         return self._opt4_tp_scatter_csr(edge_features)
 
@@ -59,6 +64,7 @@ def refresh(model, options):
     for module in model.modules():
         region = getattr(module, "_opt4_tp_scatter_csr", None)
         if isinstance(region, CheckedRegion):
+            module._opt4_edge_capacity = int(edge_rows.numel())
             region.reference.edge_rows = edge_rows
             region.reference.rows = row_ptr.shape[0] - 1
             region.compiled.set_layout(row_ptr, edge_rows, max_row)
@@ -98,7 +104,11 @@ def install(model, passes, report, options):
         )
         parent_path, _, leaf = path.rpartition(".")
         parent = model.get_submodule(parent_path) if parent_path else model
-        setattr(parent, leaf, _TensorProductScatterCSR(module, region))
+        setattr(
+            parent,
+            leaf,
+            _TensorProductScatterCSR(module, region, edge_rows.numel()),
+        )
         modules.append(detail)
     record(
         report,
