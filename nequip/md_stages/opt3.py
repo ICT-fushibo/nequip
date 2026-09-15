@@ -756,6 +756,16 @@ class WholeStepCUDAGraphMD:
             from md_benchmark.opt4_registry import prepare_model
             from .opt4_fusion import install
             prepare_model(calculator.model, options, install)
+        elif shared_calculator is not None and options.get("_opt4_passes"):
+            from .opt4_fusion import refresh
+
+            refresh(
+                calculator.model,
+                {
+                    **options,
+                    "neighbor_capacities": list(neighbor_capacities),
+                },
+            )
         self.wrapper = ForceOnlyEnergyVJP.from_released_graph_model(
             calculator.model
         ).eval()
