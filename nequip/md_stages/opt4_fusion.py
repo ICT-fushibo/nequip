@@ -12,7 +12,12 @@ from md_benchmark.opt4_registry import fixed_csr_layout, record
 
 
 class _Uniform1DTPScatter(nn.Module):
-    """Source gather + original TP instructions + destination reduction."""
+    """Source gather + original TP instructions + live destination reduction.
+
+    The fixed-capacity builder guarantees the edge tensor shape, but padding
+    slots use distributed sink destinations.  Consequently ``edge_dst`` is a
+    live graph input and cannot be replaced by the capacity-slot row layout.
+    """
 
     def __init__(self, tp, edge_rows, rows: int) -> None:
         super().__init__()
@@ -24,10 +29,10 @@ class _Uniform1DTPScatter(nn.Module):
         self.edge_rows = edge_rows
         self.rows = int(rows)
 
-    def forward(self, x, edge_attr, edge_weight, edge_src):
+    def forward(self, x, edge_attr, edge_weight, edge_dst, edge_src):
         edge_features = self._tp(x.index_select(0, edge_src), edge_attr, edge_weight)
         out = edge_features.new_zeros((self.rows, edge_features.shape[-1]))
-        out.index_add_(0, self.edge_rows, edge_features)
+        out.index_add_(0, edge_dst, edge_features)
         return out
 
 
@@ -43,7 +48,9 @@ class _FastEqTensorProductScatter(nn.Module):
     def forward(self, x, edge_attr, edge_weight, edge_dst, edge_src):
         if edge_src.shape[0] != self._opt4_edge_capacity:
             return self.original(x, edge_attr, edge_weight, edge_dst, edge_src)
-        return self._opt4_fasteq_uniform1d(x, edge_attr, edge_weight, edge_src)
+        return self._opt4_fasteq_uniform1d(
+            x, edge_attr, edge_weight, edge_dst, edge_src
+        )
 
 
 def _layout(options, parameter):
@@ -122,8 +129,9 @@ def install(model, passes, report, options):
         fused_boundaries=[
             "source-gather",
             "tp-instruction-chain",
-            "destination-reduce",
+            "live-destination-reduce",
         ],
+        topology="fixed-shape-live-edge-dst",
         nested_fx_tp_regions=False,
         gemm="original-e3nn",
         backward="aot-compiled-complete-input-vjp",
