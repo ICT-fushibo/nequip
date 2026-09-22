@@ -16,6 +16,7 @@ scientific reference used by the mandatory pre-capture parity check.
 from __future__ import annotations
 
 import math
+import os
 import time
 import warnings
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import ase.io
 from ase import Atoms, units
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from md_benchmark.md_route import (
@@ -64,11 +66,13 @@ from torch import Tensor
 from nequip.data import AtomicDataDict
 from nequip.md_stages.opt1 import (
     BerendsenIntegrator,
+    EagerNequIPTorchSimEvaluator,
     GPUMDState,
     ModelOutput,
     NoseHooverChainIntegrator,
     _build_integrator,
     _configure_precision,
+    _configure_output,
     _distribution_version,
     _frame,
     _observation,
@@ -1438,13 +1442,6 @@ def _validate_request(request: MDRunRequest) -> Path:
         raise ValueError("NVT MD requires at least two atoms")
     if not bool(np.all(request.atoms.pbc)):
         raise ValueError("NequIP Opt3 fixed builder requires full PBC")
-    if request.config.collect_trajectory:
-        raise ValueError(
-            "NequIP Opt3 captures fixed-cell force-only inference and cannot "
-            "produce stress trajectories"
-        )
-    if request.output_path is not None:
-        raise ValueError("NequIP Opt3 output_path requires unsupported trajectory")
     path = Path(request.model_path).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -1497,6 +1494,7 @@ def run_md(request: MDRunRequest) -> MDRunResult:
         device = torch.device("cuda", torch.cuda.current_device())
     config = request.config
     atoms = request.atoms.copy()
+    target_path, partial_path = _configure_output(request)
     MaxwellBoltzmannDistribution(
         atoms,
         temperature_K=config.temperature_k,
@@ -1518,6 +1516,17 @@ def run_md(request: MDRunRequest) -> MDRunResult:
         raise TypeError("NequIP Opt3 received an unsupported integrator")
     profiler = CudaPhaseProfiler(
         enabled=performance_profile_requested(request.options), device=device, prefix="opt3"
+    )
+    stress_evaluator = (
+        EagerNequIPTorchSimEvaluator(
+            atoms,
+            str(model_path),
+            device=device,
+            require_stress=True,
+            profiler=profiler,
+        )
+        if config.collect_trajectory
+        else None
     )
     engine = WholeStepCUDAGraphMD(
         atoms,
@@ -1594,6 +1603,9 @@ def run_md(request: MDRunRequest) -> MDRunResult:
         engine.reset_production(initial)
     state = GPUMDState(engine.positions, engine.momenta)
     observations: list[MDObservation] = []
+    in_memory_trajectory = (
+        [] if config.collect_trajectory and target_path is None else None
+    )
     observation_steps = set(config.observation_steps)
 
     torch.cuda.reset_peak_memory_stats(device)
@@ -1609,6 +1621,33 @@ def run_md(request: MDRunRequest) -> MDRunResult:
         if controller is not None:
             engine = controller.generation
             state = GPUMDState(engine.positions, engine.momenta, state.output)
+
+    def record_frame(step: int) -> None:
+        if stress_evaluator is None:
+            raise RuntimeError("NequIP trajectory stress evaluator is missing")
+        stress_output = stress_evaluator(state.positions)
+        if stress_output.stress is None:
+            raise RuntimeError("NequIP trajectory evaluator returned no stress")
+        if state.output is None:
+            raise RuntimeError("NequIP trajectory frame has no Graph output")
+        frame_state = GPUMDState(
+            state.positions,
+            state.momenta,
+            ModelOutput(
+                energy=state.output.energy,
+                forces=state.output.forces,
+                stress=stress_output.stress,
+            ),
+        )
+        frame = _frame(atoms, frame_state, step=step, require_stress=True)
+        if partial_path is not None:
+            ase.io.write(partial_path, frame, append=True, format="extxyz")
+        else:
+            assert in_memory_trajectory is not None
+            in_memory_trajectory.append(frame)
+
+    if config.collect_trajectory:
+        record_frame(0)
     if config.collect_statistics and 0 in observation_steps:
         engine.raise_for_overflow()
         observations.append(_observation(state, step=0, masses=masses))
@@ -1620,6 +1659,8 @@ def run_md(request: MDRunRequest) -> MDRunResult:
                 # Observation already synchronizes energy/forces to the host.
                 engine.raise_for_overflow()
                 observations.append(_observation(state, step=step, masses=masses))
+            if config.collect_trajectory and step % config.record_interval == 0:
+                record_frame(step)
     else:
         completed = 0
         for step in transaction_boundaries(
@@ -1627,6 +1668,9 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             window_steps=int(request.options["rob1_window_steps"]),
             observation_steps=(
                 config.observation_steps if config.collect_statistics else ()
+            ),
+            record_interval=(
+                config.record_interval if config.collect_trajectory else 0
             ),
             verlet_rebuild_interval=engine.verlet_rebuild_interval,
         ):
@@ -1637,11 +1681,16 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             state = GPUMDState(engine.positions, engine.momenta, output)
             if config.collect_statistics and step in observation_steps:
                 observations.append(_observation(state, step=step, masses=masses))
+            if config.collect_trajectory and step % config.record_interval == 0:
+                record_frame(step)
     torch.cuda.synchronize(device)
     if controller is None:
         engine.raise_for_overflow()
     profiler.stop()
     elapsed = time.perf_counter() - started
+    if target_path is not None:
+        assert partial_path is not None
+        os.replace(partial_path, target_path)
     performance_profile = profiler.summary(synchronize=False)
     peak_memory_gb = torch.cuda.max_memory_allocated(device) / 1.0e9
     expected_replays = config.steps + 1
@@ -1669,8 +1718,8 @@ def run_md(request: MDRunRequest) -> MDRunResult:
         peak_cuda_memory_gb=peak_memory_gb,
         final_atoms=final_atoms,
         observations=observations,
-        trajectory=None,
-        trajectory_path=None,
+        trajectory=in_memory_trajectory,
+        trajectory_path=str(target_path) if target_path is not None else None,
         metadata={
             "engine": "nequip_whole_step_cuda_graph",
             "backend": request.backend,
@@ -1691,7 +1740,11 @@ def run_md(request: MDRunRequest) -> MDRunResult:
                 "thermostat_state",
                 "persistent_state_update",
             ],
-            "uncaptured_components": ["statistics", "overflow_host_check"],
+            "uncaptured_components": [
+                "statistics",
+                "trajectory_record_boundary_stress",
+                "overflow_host_check",
+            ],
             "integrator": config.integrator,
             "force_wrapper": "fixed_cell_position_only_vjp",
             "model_parameters_require_grad": False,
@@ -1749,8 +1802,14 @@ def run_md(request: MDRunRequest) -> MDRunResult:
                 engine.output_addresses_stable
             ),
             "cuda_graph_capture_wall_time_s": engine.capture_wall_time_s,
-            "stress_requested": False,
-            "stress_supported": False,
+            "stress_requested": config.collect_trajectory,
+            "stress_supported": True,
+            "trajectory_stress_backend": (
+                "eager-record-boundary-same-checkpoint"
+                if config.collect_trajectory
+                else None
+            ),
+            "trajectory_stress_cost_in_elapsed": config.collect_trajectory,
             "warmup_steps": config.warmup_steps,
             "capture_warmup": engine.capture_warmup,
             "verlet_rebuild_interval": engine.verlet_rebuild_interval,

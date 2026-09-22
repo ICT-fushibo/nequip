@@ -213,13 +213,12 @@ def test_opt3_validation_accepts_nhc_and_berendsen(tmp_path) -> None:
     assert _validate_request(request).name == "model.nequip.zip"
 
 
-def test_opt3_validation_rejects_wrong_backend_and_trajectory(tmp_path) -> None:
+def test_opt3_validation_rejects_wrong_backend_and_accepts_trajectory(tmp_path) -> None:
     with pytest.raises(ValueError, match="whole-step-cuda-graph"):
         _validate_request(_request(tmp_path, backend="model-only-cuda-graph"))
     request = _request(tmp_path)
     request.config.collect_trajectory = True
-    with pytest.raises(ValueError, match="cannot produce stress trajectories"):
-        _validate_request(request)
+    assert _validate_request(request).name == "model.nequip.zip"
 
 
 @pytest.mark.parametrize(
