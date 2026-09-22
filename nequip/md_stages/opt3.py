@@ -1810,6 +1810,24 @@ def run_md(request: MDRunRequest) -> MDRunResult:
                 else None
             ),
             "trajectory_stress_cost_in_elapsed": config.collect_trajectory,
+            "trajectory_stress_recompute_count": (
+                config.steps // config.record_interval + 1
+                if config.collect_trajectory
+                else 0
+            ),
+            "trajectory_record_interval": (
+                config.record_interval if config.collect_trajectory else 0
+            ),
+            "trajectory_frame_count": (
+                config.steps // config.record_interval + 1
+                if config.collect_trajectory
+                else 0
+            ),
+            "trajectory_stress_source": (
+                "same-checkpoint-current-recorded-positions"
+                if config.collect_trajectory
+                else None
+            ),
             "warmup_steps": config.warmup_steps,
             "capture_warmup": engine.capture_warmup,
             "verlet_rebuild_interval": engine.verlet_rebuild_interval,
