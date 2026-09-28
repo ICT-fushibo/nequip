@@ -372,8 +372,10 @@ class FixedShapeAlchemiNeighborBuilder:
         if self.verlet_skin <= 0:
             return
         requested = self.verlet_candidate_capacity
-        slots = max(self.neighbors_per_atom, int(requested)) if requested is not None else max(
-            self.neighbors_per_atom * 2, self.neighbors_per_atom + 32
+        slots = (
+            max(self.neighbors_per_atom, int(requested))
+            if requested is not None
+            else max(self.neighbors_per_atom * 2, self.neighbors_per_atom + 32)
         )
         slots = min(slots, self.candidates_per_centre)
         selected, counts, selected_valid = select_skin_candidates(
@@ -436,9 +438,9 @@ class FixedShapeAlchemiNeighborBuilder:
             source_ids = self.candidate_sources.index_select(0, cached).reshape(
                 self.num_atoms, -1
             )
-            candidate_shifts = self.candidate_shifts.index_select(
-                0, cached
-            ).reshape(self.num_atoms, -1, 3)
+            candidate_shifts = self.candidate_shifts.index_select(0, cached).reshape(
+                self.num_atoms, -1, 3
+            )
             candidate_width = int(source_ids.shape[1])
             shift_vectors = torch.mm(
                 candidate_shifts.reshape(-1, 3).to(dtype=positions.dtype),
@@ -447,9 +449,11 @@ class FixedShapeAlchemiNeighborBuilder:
             source_positions = positions.index_select(
                 0, source_ids.reshape(-1)
             ).reshape(self.num_atoms, candidate_width, 3)
-            candidate_ids = torch.arange(
-                candidate_width, dtype=torch.long, device=self.device
-            ).reshape(1, -1).expand(self.num_atoms, -1)
+            candidate_ids = (
+                torch.arange(candidate_width, dtype=torch.long, device=self.device)
+                .reshape(1, -1)
+                .expand(self.num_atoms, -1)
+            )
             vectors = positions.unsqueeze(1) - source_positions + shift_vectors
             valid_candidates = self.skin_candidate_mask
         else:
@@ -507,25 +511,17 @@ class FixedShapeAlchemiNeighborBuilder:
         selected_valid = selected_valid_matrix.reshape(-1).index_select(
             0, self.selection_indices
         )
-        sources = selected_sources.reshape(-1).index_select(
-            0, self.selection_indices
-        )
-        shifts = selected_shifts.reshape(-1, 3).index_select(
-            0, self.selection_indices
-        )
+        sources = selected_sources.reshape(-1).index_select(0, self.selection_indices)
+        shifts = selected_shifts.reshape(-1, 3).index_select(0, self.selection_indices)
         maximum = counts.max()
-        excess = torch.clamp_min(
-            (counts - self.neighbor_capacities).max(), 0
-        )
+        excess = torch.clamp_min((counts - self.neighbor_capacities).max(), 0)
         overflow = excess > 0
         output_valid = (
             selected_valid & ~overflow
             if self.overflow_to_dummy_only
             else selected_valid
         )
-        self.edge_index[0].copy_(
-            torch.where(output_valid, sources, self.sink_indices)
-        )
+        self.edge_index[0].copy_(torch.where(output_valid, sources, self.sink_indices))
         self.edge_index[1].copy_(
             torch.where(output_valid, self.slot_centres, self.sink_indices)
         )
@@ -578,9 +574,7 @@ class FixedShapeAlchemiNeighborBuilder:
                 self.window_overflow_dummy_only_replays.item()
             ),
             "fixed_builder_window_maximum_neighbors_by_atom": (
-                self.window_maximum_neighbors_by_atom.detach()
-                .to(device="cpu")
-                .tolist()
+                self.window_maximum_neighbors_by_atom.detach().to(device="cpu").tolist()
             ),
         }
 
@@ -604,9 +598,7 @@ class FixedShapeAlchemiNeighborBuilder:
             "fixed_builder_build_calls": calls,
             "fixed_builder_capacity_misses": misses,
             "overflow_to_dummy_only": self.overflow_to_dummy_only,
-            "overflow_dummy_only_replays": int(
-                self.overflow_dummy_only_replays.item()
-            ),
+            "overflow_dummy_only_replays": int(self.overflow_dummy_only_replays.item()),
             "fixed_builder_first_overflow_step": first if first >= 0 else None,
             "fixed_builder_edge_capacity": self.edge_capacity,
             "fixed_builder_neighbors_per_atom": self.neighbors_per_atom,
@@ -711,18 +703,18 @@ class WholeStepCUDAGraphMD:
 
         from nequip.integrations.torchsim import NequIPTorchSimCalc
         from nequip.md_stages.opt1 import _assert_plain_eager_model
+
         enable_cueq = bool(options.get("_opt4_enable_cueq", False))
         self.cueq_enabled = enable_cueq
 
         self.device = device
         self.num_atoms = len(atoms)
+        self.capture_stress = bool(options.get("_opt4_capture_stress", False))
         self.integrator = integrator
         self.capture_warmup = int(options.get("capture_warmup", 3))
         if self.capture_warmup < 0:
             raise ValueError("capture_warmup must be non-negative")
-        self.verlet_rebuild_interval = int(
-            options.get("verlet_rebuild_interval", 0)
-        )
+        self.verlet_rebuild_interval = int(options.get("verlet_rebuild_interval", 0))
         if self.verlet_rebuild_interval < 0:
             raise ValueError("verlet_rebuild_interval must be non-negative")
         atomic_numbers = torch.as_tensor(
@@ -759,6 +751,7 @@ class WholeStepCUDAGraphMD:
         if shared_calculator is None and options.get("_opt4_passes"):
             from md_benchmark.opt4_registry import prepare_model
             from .opt4_fusion import install
+
             prepare_model(calculator.model, options, install)
         elif shared_calculator is not None and options.get("_opt4_passes"):
             from .opt4_fusion import refresh
@@ -799,6 +792,14 @@ class WholeStepCUDAGraphMD:
             )
 
         exact_inputs = {key: exact[key] for key in self.model_fields}
+        if self.capture_stress:
+            from .stress_vjp import ForceStressEnergyVJP
+
+            self.wrapper = ForceStressEnergyVJP(
+                self.wrapper.energy_model,
+                exact_inputs[AtomicDataDict.POSITIONS_KEY],
+                exact_inputs[AtomicDataDict.CELL_KEY],
+            ).eval()
         exact_edge_index = exact_inputs[AtomicDataDict.EDGE_INDEX_KEY]
         self.initial_maximum_neighbors = int(
             torch.bincount(exact_edge_index[1], minlength=self.num_atoms).max().item()
@@ -806,9 +807,9 @@ class WholeStepCUDAGraphMD:
         neighbors_per_atom, requested_total = _neighbors_per_atom(
             exact_edge_index, num_atoms=self.num_atoms, options=options
         )
-        initial_counts = torch.bincount(
-            exact_edge_index[1], minlength=self.num_atoms
-        )[: self.num_atoms]
+        initial_counts = torch.bincount(exact_edge_index[1], minlength=self.num_atoms)[
+            : self.num_atoms
+        ]
         if neighbor_capacities is None and options.get("per_atom_cap", False):
             capacities = capacities_from_counts(
                 initial_counts,
@@ -881,9 +882,7 @@ class WholeStepCUDAGraphMD:
             output_edge_shift=self.static_inputs[AtomicDataDict.EDGE_CELL_SHIFT_KEY],
             verlet_skin=float(options.get("verlet_skin", 0.0)),
             verlet_candidate_capacity=options.get("verlet_candidate_capacity"),
-            overflow_to_dummy_only=bool(
-                options.get("overflow_to_dummy_only", False)
-            ),
+            overflow_to_dummy_only=bool(options.get("overflow_to_dummy_only", False)),
         )
         self.builder.initialize_skin(initial_state.positions)
         if self.builder.verlet_skin <= 0:
@@ -932,7 +931,30 @@ class WholeStepCUDAGraphMD:
         fixed_validation[AtomicDataDict.POSITIONS_KEY].requires_grad_(True)
         with torch.enable_grad():
             exact_energy, exact_forces = self.wrapper(exact_validation)
+            if self.capture_stress:
+                from md_benchmark.stress_capture import validate_stress
+
+                exact_stress = self.wrapper.last_stress.clone()
+                native = calculator.model(
+                    {
+                        key: value.detach().clone()
+                        for key, value in exact_validation.items()
+                    }
+                )
+                validate_stress(
+                    exact_stress,
+                    native[AtomicDataDict.STRESS_KEY],
+                    dtype=exact_validation[AtomicDataDict.POSITIONS_KEY].dtype,
+                    context="NequIP native strain VJP",
+                )
             fixed_energy, fixed_forces = self.wrapper(fixed_validation)
+            if self.capture_stress:
+                validate_stress(
+                    self.wrapper.last_stress,
+                    exact_stress,
+                    dtype=exact_validation[AtomicDataDict.POSITIONS_KEY].dtype,
+                    context="NequIP fixed-padding stress",
+                )
         self.validation_max_abs = {
             "alchemiops_vs_fixed_builder_energy": _max_abs(
                 fixed_energy.detach(), exact_energy.detach()
@@ -974,6 +996,11 @@ class WholeStepCUDAGraphMD:
         self.momenta = initial_state.momenta.detach().clone()
         self.forces = torch.zeros_like(self.positions)
         self.energy = torch.zeros((), dtype=torch.float64, device=device)
+        self.stress = (
+            torch.zeros((3, 3), dtype=torch.float64, device=device)
+            if self.capture_stress
+            else None
+        )
         self.advance = torch.zeros((), dtype=torch.float64, device=device)
         self.step_counter = torch.zeros((), dtype=torch.long, device=device)
         if isinstance(integrator, NoseHooverChainIntegrator):
@@ -1012,6 +1039,8 @@ class WholeStepCUDAGraphMD:
         self.momenta.copy_(initial.momenta)
         self.forces.zero_()
         self.energy.zero_()
+        if self.stress is not None:
+            self.stress.zero_()
         self.advance.zero_()
         self.step_counter.zero_()
         if self.thermostat_eta is not None:
@@ -1156,6 +1185,8 @@ class WholeStepCUDAGraphMD:
             self.momenta.copy_(final_momenta)
             self.forces.copy_(forces)
             self.energy.copy_(model_energy.reshape(-1)[0].to(torch.float64))
+            if self.stress is not None:
+                self.stress.copy_(self.wrapper.last_stress)
             if eta_final is not None:
                 assert old_eta is not None and old_p_eta is not None
                 assert self.thermostat_eta is not None
@@ -1219,6 +1250,9 @@ class WholeStepCUDAGraphMD:
             "edge_index": self.builder.edge_index.data_ptr(),
             "edge_shift": self.builder.edge_shift.data_ptr(),
         }
+        if self.stress is not None:
+            addresses["stress"] = self.stress.data_ptr()
+            addresses["strain"] = self.wrapper.strain.data_ptr()
         if self.thermostat_eta is not None:
             addresses["thermostat_eta"] = self.thermostat_eta.data_ptr()
             assert self.thermostat_p_eta is not None
@@ -1233,6 +1267,8 @@ class WholeStepCUDAGraphMD:
             "forces": self.forces.clone(),
             "energy": self.energy.clone(),
         }
+        if self.stress is not None:
+            snapshot["stress"] = self.stress.clone()
         if self.thermostat_eta is not None:
             snapshot["thermostat_eta"] = self.thermostat_eta.clone()
             assert self.thermostat_p_eta is not None
@@ -1273,6 +1309,15 @@ class WholeStepCUDAGraphMD:
         torch.cuda.synchronize(self.device)
         self.builder.raise_for_overflow()
         replay = self._state_snapshot()
+        if self.capture_stress:
+            from md_benchmark.stress_capture import validate_stress
+
+            validate_stress(
+                replay["stress"],
+                eager["stress"],
+                dtype=self.model_positions.dtype,
+                context="NequIP replay stress",
+            )
 
         if self._addresses() != addresses:
             raise RuntimeError(
@@ -1312,6 +1357,10 @@ class WholeStepCUDAGraphMD:
                 rtol, atol = force_rtol, force_atol
             elif name == "energy":
                 rtol, atol = energy_rtol, energy_atol
+            elif name == "stress":
+                from md_benchmark.stress_capture import stress_tolerances
+
+                rtol, atol = stress_tolerances(self.model_positions.dtype)
             else:
                 rtol, atol = state_rtol, state_atol
             passed = passed and bool(
@@ -1372,7 +1421,7 @@ class WholeStepCUDAGraphMD:
         return self.output_view()
 
     def output_view(self) -> ModelOutput:
-        return ModelOutput(energy=self.energy, forces=self.forces, stress=None)
+        return ModelOutput(energy=self.energy, forces=self.forces, stress=self.stress)
 
     def raise_for_overflow(self) -> None:
         self.builder.raise_for_overflow()
@@ -1386,6 +1435,8 @@ class WholeStepCUDAGraphMD:
             "advance": self.advance,
             "step_counter": self.step_counter,
         }
+        if self.stress is not None:
+            state["stress"] = self.stress
         if self.thermostat_eta is not None:
             state["eta"] = self.thermostat_eta
             assert self.thermostat_p_eta is not None
@@ -1401,9 +1452,7 @@ class WholeStepCUDAGraphMD:
             overflow_dummy_only_replays=(
                 self.builder.window_overflow_dummy_only_replays
             ),
-            maximum_required_by_atom=(
-                self.builder.window_maximum_neighbors_by_atom
-            ),
+            maximum_required_by_atom=(self.builder.window_maximum_neighbors_by_atom),
             verlet_skin_misses=self.builder.skin_misses,
         )
 
@@ -1413,9 +1462,7 @@ class WholeStepCUDAGraphMD:
             "cuda_graph_capture_count": self.capture_count,
             "cuda_graph_capture_wall_time_s": self.capture_wall_time_s,
             "cuda_graph_production_replays": self.production_replays,
-            "cuda_graph_replay_output_addresses_stable": (
-                self.output_addresses_stable
-            ),
+            "cuda_graph_replay_output_addresses_stable": (self.output_addresses_stable),
         }
 
     def release(self) -> None:
@@ -1515,7 +1562,9 @@ def run_md(request: MDRunRequest) -> MDRunResult:
     if not isinstance(integrator, (BerendsenIntegrator, NoseHooverChainIntegrator)):
         raise TypeError("NequIP Opt3 received an unsupported integrator")
     profiler = CudaPhaseProfiler(
-        enabled=performance_profile_requested(request.options), device=device, prefix="opt3"
+        enabled=performance_profile_requested(request.options),
+        device=device,
+        prefix="opt3",
     )
     stress_evaluator = (
         EagerNequIPTorchSimEvaluator(
@@ -1526,6 +1575,7 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             profiler=profiler,
         )
         if config.collect_trajectory
+        and not request.options.get("_opt4_capture_stress", False)
         else None
     )
     engine = WholeStepCUDAGraphMD(
@@ -1568,12 +1618,10 @@ def run_md(request: MDRunRequest) -> MDRunResult:
                 shared_calculator=shared_calculator,
             )
             generation.capture(recovery_initial)
-            generation.validate_one_step(
-                recovery_initial, options=request.options
+            generation.validate_one_step(recovery_initial, options=request.options)
+            generation.production_replays = (
+                int(snapshot["step_counter"].detach().cpu()) + 1
             )
-            generation.production_replays = int(
-                snapshot["step_counter"].detach().cpu()
-            ) + 1
             return generation
 
         controller = Rob1Controller(
@@ -1623,9 +1671,12 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             state = GPUMDState(engine.positions, engine.momenta, state.output)
 
     def record_frame(step: int) -> None:
-        if stress_evaluator is None:
-            raise RuntimeError("NequIP trajectory stress evaluator is missing")
-        stress_output = stress_evaluator(state.positions)
+        if engine.capture_stress:
+            stress_output = engine.output_view()
+        else:
+            if stress_evaluator is None:
+                raise RuntimeError("NequIP trajectory stress evaluator is missing")
+            stress_output = stress_evaluator(state.positions)
         if stress_output.stress is None:
             raise RuntimeError("NequIP trajectory evaluator returned no stress")
         if state.output is None:
@@ -1640,6 +1691,9 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             ),
         )
         frame = _frame(atoms, frame_state, step=step, require_stress=True)
+        from md_benchmark.stress_capture import save_validation_frame
+
+        save_validation_frame(frame, request.options)
         if partial_path is not None:
             ase.io.write(partial_path, frame, append=True, format="extxyz")
         else:
@@ -1705,9 +1759,7 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             f"expected {expected_replays}, observed {actual_replays}"
         )
     _validate_finite(state)
-    builder_stats = (
-        engine.builder.stats() if controller is None else controller.stats()
-    )
+    builder_stats = engine.builder.stats() if controller is None else controller.stats()
 
     final_atoms = _frame(atoms, state, step=config.steps, require_stress=False)
     result = MDRunResult(
@@ -1850,6 +1902,25 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             "model_specific_fusion": bool(engine.cueq_enabled),
         },
     )
+    if engine.capture_stress:
+        from md_benchmark.stress_capture import BACKEND, capture_metadata
+
+        result.metadata.update(
+            capture_metadata(True, stable=engine.output_addresses_stable)
+        )
+        result.metadata.update(
+            trajectory_stress_backend=BACKEND,
+            trajectory_stress_recompute_count=0,
+            trajectory_record_model_calls=0,
+            trajectory_stress_source="captured-current-committed-state",
+            force_wrapper="fixed_cell_position_and_strain_vjp",
+        )
+        result.metadata["uncaptured_components"] = [
+            item
+            for item in result.metadata.get("uncaptured_components", [])
+            if item != "trajectory_record_boundary_stress"
+        ]
+        result.metadata["captured_components"].append("stress_strain_vjp")
     validate_result(request, result)
     return result
 
