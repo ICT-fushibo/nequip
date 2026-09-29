@@ -748,6 +748,10 @@ class WholeStepCUDAGraphMD:
         calculator.compute_forces = False
         calculator.compute_stress = False
         self.calculator = calculator
+        if self.capture_stress:
+            from md_benchmark.stress_capture import model_stress_dtype
+
+            self.stress_validation_dtype = model_stress_dtype(calculator.model)
         if shared_calculator is None and options.get("_opt4_passes"):
             from md_benchmark.opt4_registry import prepare_model
             from .opt4_fusion import install
@@ -944,7 +948,7 @@ class WholeStepCUDAGraphMD:
                 validate_stress(
                     exact_stress,
                     native[AtomicDataDict.STRESS_KEY],
-                    dtype=exact_validation[AtomicDataDict.POSITIONS_KEY].dtype,
+                    dtype=self.stress_validation_dtype,
                     context="NequIP native strain VJP",
                 )
             fixed_energy, fixed_forces = self.wrapper(fixed_validation)
@@ -952,7 +956,7 @@ class WholeStepCUDAGraphMD:
                 validate_stress(
                     self.wrapper.last_stress,
                     exact_stress,
-                    dtype=exact_validation[AtomicDataDict.POSITIONS_KEY].dtype,
+                    dtype=self.stress_validation_dtype,
                     context="NequIP fixed-padding stress",
                 )
         self.validation_max_abs = {
@@ -1315,7 +1319,7 @@ class WholeStepCUDAGraphMD:
             validate_stress(
                 replay["stress"],
                 eager["stress"],
-                dtype=self.model_positions.dtype,
+                dtype=self.stress_validation_dtype,
                 context="NequIP replay stress",
             )
 
@@ -1360,7 +1364,7 @@ class WholeStepCUDAGraphMD:
             elif name == "stress":
                 from md_benchmark.stress_capture import stress_tolerances
 
-                rtol, atol = stress_tolerances(self.model_positions.dtype)
+                rtol, atol = stress_tolerances(self.stress_validation_dtype)
             else:
                 rtol, atol = state_rtol, state_atol
             passed = passed and bool(
@@ -1914,6 +1918,7 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             trajectory_record_model_calls=0,
             trajectory_stress_source="captured-current-committed-state",
             force_wrapper="fixed_cell_position_and_strain_vjp",
+            stress_validation_compute_dtype=str(engine.stress_validation_dtype),
         )
         result.metadata["uncaptured_components"] = [
             item
