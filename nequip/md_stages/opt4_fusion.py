@@ -5,9 +5,12 @@ Algorithmic adaptation of FastEq commit 40ba40e72bee769d74a869bb4a4ba820ee1c55c0
 """
 from __future__ import annotations
 
+import torch
 from torch import nn
 
-from md_benchmark.opt4_fx import CheckedRegion, install_tp_regions
+from md_benchmark.opt4_fx import (
+    CheckedRegion, assert_associative_sum_close, install_tp_regions,
+)
 from md_benchmark.opt4_registry import fixed_csr_layout, record
 
 
@@ -19,11 +22,12 @@ class _Uniform1DTPScatter(nn.Module):
     live graph input and cannot be replaced by the capacity-slot row layout.
     """
 
-    def __init__(self, tp, edge_rows, rows: int) -> None:
+    def __init__(self, tp, edge_rows, rows: int, detail=None) -> None:
         super().__init__()
         object.__setattr__(self, "_tp", tp)
         self.register_buffer("edge_rows", edge_rows, persistent=False)
         self.rows = int(rows)
+        object.__setattr__(self, "_validation_detail", detail)
 
     def set_layout(self, edge_rows, rows: int) -> None:
         self.edge_rows = edge_rows
@@ -34,6 +38,50 @@ class _Uniform1DTPScatter(nn.Module):
         out = edge_features.new_zeros((self.rows, edge_features.shape[-1]))
         out.index_add_(0, edge_dst, edge_features)
         return out
+
+    def validate_source_vjp(self, actual, expected, args, index, output_probes):
+        """Certify ONLY the gather adjoint, using independent per-edge VJPs.
+
+        Duplicate sources turn index_select's adjoint into a sum. A compiled
+        scatter may use another IEEE addition order. Do not waive errors in
+        SH/radial derivatives or substitute a global norm tolerance. This
+        setup-only check differentiates the *unfused* TP before source scatter,
+        then tests BOTH node gradients against a float64 sum of those terms.
+        The production graph, dtype and frozen TP-v1 regions are unchanged.
+        """
+        if index != 0 or actual.dtype != torch.float32 or expected.dtype != torch.float32:
+            return False
+        try:
+            torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-6)
+            return True
+        except AssertionError:
+            pass
+        x, edge_attr, edge_weight, edge_dst, edge_src = args
+        if len(output_probes) != 1 or output_probes[0] is None:
+            raise AssertionError("NequIP source VJP needs the exact output cotangent")
+        with torch.enable_grad():
+            gathered = x.detach().index_select(0, edge_src).requires_grad_(True)
+            values = self._tp(gathered, edge_attr.detach(), edge_weight.detach())
+            terms = torch.autograd.grad(
+                values, gathered,
+                grad_outputs=output_probes[0].index_select(0, edge_dst),
+            )[0].detach()
+        if not bool(torch.isfinite(terms).all()):
+            raise AssertionError("non-finite NequIP independent per-edge source VJP")
+        max_terms = max(1, int(torch.bincount(edge_src, minlength=x.shape[0]).max()))
+        assert_associative_sum_close(
+            actual, expected, terms, edge_src, int(x.shape[0]), max_terms,
+            rtol=1e-4, atol=1e-6,
+        )
+        if self._validation_detail is not None:
+            self._validation_detail.setdefault("source_vjp_certificates", []).append({
+                "status": "passed-independent-sum-bound",
+                "input_index": 0,
+                "max_source_multiplicity": max_terms,
+                "max_abs_candidate_native": float((actual - expected).abs().max()),
+                "reference": "unfused-per-edge-TP-VJP-summed-in-float64",
+            })
+        return True
 
 
 class _FastEqTensorProductScatter(nn.Module):
@@ -109,8 +157,13 @@ def install(model, passes, report, options):
             "validated_shapes": 0,
             "benchmark_requested": report.get("benchmark_boundaries", False),
         }
-        boundary = _Uniform1DTPScatter(module.tp, edge_rows, rows)
-        region = CheckedRegion(boundary, detail)
+        boundary = _Uniform1DTPScatter(module.tp, edge_rows, rows, detail)
+        region = CheckedRegion(
+            boundary, detail, vjp_validator=boundary.validate_source_vjp,
+            validate_runtime_vjp=True,
+        )
+        detail["source_vjp_validation"] = "strict-or-independent-edge-vjp-fp64-sum-bound"
+        detail["other_vjp_validation"] = "unchanged-elementwise-rtol1e-4-atol1e-6"
         parent_path, _, leaf = path.rpartition(".")
         parent = model.get_submodule(parent_path) if parent_path else model
         setattr(
