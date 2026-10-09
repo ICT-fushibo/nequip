@@ -549,9 +549,16 @@ def run_md(request: MDRunRequest) -> MDRunResult:
         atoms,
         str(model_path),
         device=device,
-        require_stress=config.collect_trajectory,
+        require_stress=(
+            config.collect_trajectory
+            if request.options.get("benchmark_stress_mode", "legacy") == "legacy"
+            else request.options["benchmark_stress_mode"] == "every-step"),
         profiler=profiler,
     )
+
+    if request.options.get("benchmark_stress_mode") == "off":
+        from md_benchmark.nequip_force_only import force_only_model
+        evaluator.calculator.model = force_only_model(evaluator.calculator.model)
 
     # Warmup owns disposable state and thermostat variables.  Production is
     # reconstructed from the exact initial positions/momenta, matching the ASE
@@ -573,7 +580,7 @@ def run_md(request: MDRunRequest) -> MDRunResult:
     observation_steps = set(config.observation_steps)
 
     def record_frame(step: int) -> None:
-        frame = _frame(atoms, state, step=step, require_stress=True)
+        frame = _frame(atoms, state, step=step, require_stress=evaluator.require_stress)
         if partial_path is not None:
             ase.io.write(partial_path, frame, append=True, format="extxyz")
         else:

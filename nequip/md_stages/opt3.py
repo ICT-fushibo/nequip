@@ -710,6 +710,8 @@ class WholeStepCUDAGraphMD:
         self.device = device
         self.num_atoms = len(atoms)
         self.capture_stress = bool(options.get("_opt4_capture_stress", False))
+        from md_benchmark.capture_scope import scope_from_options
+        self.benchmark_capture_scope = scope_from_options(options)
         self.integrator = integrator
         self.capture_warmup = int(options.get("capture_warmup", 3))
         if self.capture_warmup < 0:
@@ -1220,11 +1222,12 @@ class WholeStepCUDAGraphMD:
         current.wait_stream(side)
         torch.cuda.synchronize(self.device)
 
-        graph = torch.cuda.CUDAGraph()
+        from md_benchmark.capture_scope import capture_execution
         started = time.perf_counter()
         try:
-            with torch.enable_grad(), torch.cuda.graph(graph, stream=side):
-                self._graph_body()
+            graph = capture_execution(
+                self._graph_body, self.builder, stream=side,
+                scope=self.benchmark_capture_scope)
             torch.cuda.synchronize(self.device)
         except Exception as exc:
             raise RuntimeError(
@@ -1233,7 +1236,7 @@ class WholeStepCUDAGraphMD:
             ) from exc
         self.capture_wall_time_s = time.perf_counter() - started
         self.graph = graph
-        self.capture_count = 1
+        self.capture_count = graph.capture_count
         addresses = self._addresses()
         self.restore_(initial)
         self.builder.reset_stats()
@@ -1570,6 +1573,8 @@ def run_md(request: MDRunRequest) -> MDRunResult:
         device=device,
         prefix="opt3",
     )
+    from md_benchmark.stress_mode import stress_disabled
+    no_stress = stress_disabled(request.options)
     stress_evaluator = (
         EagerNequIPTorchSimEvaluator(
             atoms,
@@ -1580,6 +1585,7 @@ def run_md(request: MDRunRequest) -> MDRunResult:
         )
         if config.collect_trajectory
         and not request.options.get("_opt4_capture_stress", False)
+        and not no_stress
         else None
     )
     engine = WholeStepCUDAGraphMD(
@@ -1675,13 +1681,13 @@ def run_md(request: MDRunRequest) -> MDRunResult:
             state = GPUMDState(engine.positions, engine.momenta, state.output)
 
     def record_frame(step: int) -> None:
-        if engine.capture_stress:
+        if engine.capture_stress or no_stress:
             stress_output = engine.output_view()
         else:
             if stress_evaluator is None:
                 raise RuntimeError("NequIP trajectory stress evaluator is missing")
             stress_output = stress_evaluator(state.positions)
-        if stress_output.stress is None:
+        if stress_output.stress is None and not no_stress:
             raise RuntimeError("NequIP trajectory evaluator returned no stress")
         if state.output is None:
             raise RuntimeError("NequIP trajectory frame has no Graph output")
@@ -1694,7 +1700,7 @@ def run_md(request: MDRunRequest) -> MDRunResult:
                 stress=stress_output.stress,
             ),
         )
-        frame = _frame(atoms, frame_state, step=step, require_stress=True)
+        frame = _frame(atoms, frame_state, step=step, require_stress=not no_stress)
         from md_benchmark.stress_capture import save_validation_frame
 
         save_validation_frame(frame, request.options)
