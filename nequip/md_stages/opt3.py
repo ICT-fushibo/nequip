@@ -1209,7 +1209,8 @@ class WholeStepCUDAGraphMD:
         if self.graph is not None:
             raise RuntimeError("NequIP Opt3 graph has already been captured")
         current = torch.cuda.current_stream(self.device)
-        side = torch.cuda.Stream(device=self.device)
+        side = (current if self.benchmark_capture_scope == "fixed-eager"
+                else torch.cuda.Stream(device=self.device))
         side.wait_stream(current)
         with torch.cuda.stream(side), torch.enable_grad():
             self.restore_(initial)
